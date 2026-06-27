@@ -154,7 +154,7 @@ function ConvertTo-PrettyJson {
     }
 
     if ($Value -is [string]) {
-        return ($Value | ConvertTo-Json -Compress)
+        return ConvertTo-JsonString -Text $Value
     }
 
     if ($Value -is [bool]) {
@@ -197,12 +197,39 @@ function ConvertTo-PrettyJson {
     for ($i = 0; $i -lt $props.Count; $i++) {
         $property = $props[$i]
         $suffix = if ($i -lt $props.Count - 1) { "," } else { "" }
-        $name = ([string]$property.Name | ConvertTo-Json -Compress)
+        $name = ConvertTo-JsonString -Text ([string]$property.Name)
         $valueJson = ConvertTo-PrettyJson -Value $property.Value -Level ($Level + 1)
         $lines += "$childIndent$name`: $valueJson$suffix"
     }
     $lines += "$indent}"
     return ($lines -join "`n")
+}
+
+function ConvertTo-JsonString {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    foreach ($ch in $Text.ToCharArray()) {
+        switch ($ch) {
+            '"' { [void]$builder.Append('\"') }
+            '\' { [void]$builder.Append('\\') }
+            "`b" { [void]$builder.Append('\b') }
+            "`f" { [void]$builder.Append('\f') }
+            "`n" { [void]$builder.Append('\n') }
+            "`r" { [void]$builder.Append('\r') }
+            "`t" { [void]$builder.Append('\t') }
+            default {
+                if ([int][char]$ch -lt 0x20) {
+                    [void]$builder.Append('\u{0:x4}' -f [int][char]$ch)
+                } else {
+                    [void]$builder.Append($ch)
+                }
+            }
+        }
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
 }
 
 function Get-FileSha256 {
@@ -231,7 +258,7 @@ function ConvertTo-StableJson {
     }
 
     if ($Value -is [string]) {
-        return ($Value | ConvertTo-Json -Compress)
+        return ConvertTo-JsonString -Text $Value
     }
 
     if ($Value -is [bool]) {
@@ -259,7 +286,7 @@ function ConvertTo-StableJson {
     }
 
     $pairs = @($props | ForEach-Object {
-        ($_.Name | ConvertTo-Json -Compress) + ":" + (ConvertTo-StableJson $_.Value)
+        (ConvertTo-JsonString -Text ([string]$_.Name)) + ":" + (ConvertTo-StableJson $_.Value)
     })
     return "{" + ($pairs -join ",") + "}"
 }
@@ -732,6 +759,19 @@ function Convert-PackageTargetToObjectSpec {
     return $Spec
 }
 
+function Test-PackageTargetAvailable {
+    param(
+        [Parameter(Mandatory)][string]$Spec,
+        [Parameter(Mandatory)]$PackageObjects
+    )
+
+    if ($Spec -match "^pkgs\.([^:]+)(:.*)?$") {
+        return Test-MapKey -Map $PackageObjects -Key $Matches[1]
+    }
+
+    return $true
+}
+
 function Set-ManagedLink {
     param(
         [Parameter(Mandatory)][string]$Link,
@@ -1160,18 +1200,13 @@ function Invoke-Update {
         $definition = Normalize-Package -Package $packageProperty.Value
         $variables = Resolve-Variables -PackageName $packageProperty.Name -Package $definition
         $packages[$packageProperty.Name] = [ordered]@{
-            definition = $definition
             variables = $variables
         }
     }
 
-    $links = if (Test-Property -Value $config -Name "links") { $config.links } else { [pscustomobject]@{} }
-    $shortcuts = if (Test-Property -Value $config -Name "shortcuts") { $config.shortcuts } else { [pscustomobject]@{} }
     $nextPlan = [ordered]@{
         schema = 1
         packages = $packages
-        links = $links
-        shortcuts = $shortcuts
     }
 
     Save-JsonAtomic -Value $nextPlan -Path $Script:NextPlanPath
@@ -1303,6 +1338,8 @@ function Invoke-Install {
     }
 
     $input = Get-Json -Path $Script:NextPlanPath
+    $configPath = Get-NextPlanMainConfigPath
+    $config = Get-LocalConfig -Path $configPath
     $packageObjects = [ordered]@{}
     $planPackages = [ordered]@{}
     $resources = @()
@@ -1310,8 +1347,13 @@ function Invoke-Install {
     foreach ($packageProperty in @($input.packages.PSObject.Properties | Sort-Object Name)) {
         $name = $packageProperty.Name
         $entry = $packageProperty.Value
+        if (-not (Test-Property -Value $config.packages -Name $name)) {
+            throw "next plan package is missing from config: $name"
+        }
+
+        $definition = Normalize-Package -Package $config.packages.$name
         $variables = ConvertTo-Hashtable -Value $entry.variables
-        $result = Install-RegularPackage -Name $name -Definition $entry.definition -Variables $variables
+        $result = Install-RegularPackage -Name $name -Definition $definition -Variables $variables
         $packageObjects[$name] = $result.object
         $planPackages[$name] = [ordered]@{
             object = $result.object
@@ -1320,9 +1362,13 @@ function Invoke-Install {
         $resources += @($result.resources)
     }
 
-    $inputLinks = if (Test-Property -Value $input -Name "links") { $input.links } else { [pscustomobject]@{} }
+    $inputLinks = if (Test-Property -Value $config -Name "links") { $config.links } else { [pscustomobject]@{} }
     $links = @()
     foreach ($link in @($inputLinks.PSObject.Properties | Sort-Object Name)) {
+        if (-not (Test-PackageTargetAvailable -Spec ([string]$link.Value) -PackageObjects $packageObjects)) {
+            continue
+        }
+
         $links += [pscustomobject]@{
             kind = "link"
             key = "link:$($link.Name)"
@@ -1331,9 +1377,17 @@ function Invoke-Install {
     }
 
     $shortcuts = @()
-    if (Test-Property -Value $input -Name "shortcuts") {
-        foreach ($shortcut in @($input.shortcuts.PSObject.Properties | Sort-Object Name)) {
+    if (Test-Property -Value $config -Name "shortcuts") {
+        foreach ($shortcut in @($config.shortcuts.PSObject.Properties | Sort-Object Name)) {
             $shortcutValue = $shortcut.Value
+            if (-not (Test-PackageTargetAvailable -Spec ([string]$shortcutValue.program) -PackageObjects $packageObjects)) {
+                continue
+            }
+            if ((Test-Property -Value $shortcutValue -Name "cwd") -and
+                -not (Test-PackageTargetAvailable -Spec ([string]$shortcutValue.cwd) -PackageObjects $packageObjects)) {
+                continue
+            }
+
             $shortcutResource = [ordered]@{
                 kind = "shortcut"
                 key = "shortcut:$($shortcut.Name)"
