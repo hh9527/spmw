@@ -16,13 +16,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build assets
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME}"
-          mkdir -p dist
-          tar -czf dist/tarball.tar.gz bin
-          sha256sum dist/tarball.tar.gz | awk '{ print $1 }' > dist/sha256.txt
-          printf '%s\n' "$version" > dist/VERSION.txt
+        run: scripts/make-dist.sh release dist
 
       - name: Create release
         uses: softprops/action-gh-release@v2

@@ -7,30 +7,53 @@ Simple Package Manager for Windows.
 ## 目录结构
 
 - `bin/spmw-cli.ps1`：Windows CLI。
-- `tws/config.spmw.json.txt`：生产环境 bootstrap 配置模板。
-- `tws/dev-config.spmw.json.txt`：本地开发 bootstrap 配置模板。
-- `tws/bootstrap.ps1`：用于 `irm ... | iex` 的 bootstrap 脚本。
-- `tws/pack-tarballs.sh`：在 `target/` 下生成本地 tarball。
-- `tws/serve.py`：本地开发时用于服务 `target/`。
+- `scripts/make-dist.sh`：生成 release/dev 分发产物。
 - `.github/workflows/release.yml`：基于 version tag 构建 release assets。
 
 运行时状态固定在：
 
-- `~/.config.spmw.json`：本地 bootstrap 配置。
+- `~/.spmw/state/next-plan.json`：当前计划游标。
 - `~/.spmw`：object store、plan、downloads、package objects 和临时目录。
 
 ## Bootstrap
+
+生产 bootstrap 入口在 `windows-config` 仓库中：
+
+```powershell
+irm "https://raw.githubusercontent.com/hh9527/windows-config/main/bootstrap.ps1" | iex
+```
 
 生产配置使用 GitHub：
 
 - `spmw`：先读取 latest release 的版本号，再下载该版本对应的不可变 release assets。
 - `main`：先从 `windows-config` 的 Atom feed 读取最新 commit，再下载该 commit 对应的 source tarball。
 
-本地开发时，先在 Linux 侧服务 `target/`：
+bootstrap 自身只下载 latest 的 `spmw` release tarball 作为启动器，展开到 `~/.spmw/bootstrap/`。随后它过滤配置，仅保留 `main`、`spmw` 和正式 CLI link，先用 bootstrap CLI 安装正式 `spmw-cli.ps1`，再切换到正式 CLI 完成完整配置安装。
+
+本地开发时，可以生成 `spmw` 的 dev 分发产物：
 
 ```bash
-tws/pack-tarballs.sh
-python3 tws/serve.py --host 127.0.0.1 --port 10922
+scripts/make-dist.sh dev target
+```
+
+`dev` 模式会生成：
+
+- `target/tarball.<sha256>.tar.gz`
+- `target/sha256.txt`
+
+`windows-config/bootstrap.ps1` 的 dev 模式还需要同一个 HTTP 根下存在 `bootstrap.ps1` 和 `config.spmw.json`。可以准备一个 staging 目录：
+
+```bash
+mkdir -p /tmp/spmw-bootstrap
+cp target/tarball.*.tar.gz target/sha256.txt /tmp/spmw-bootstrap/
+cp ../windows-config/bootstrap.ps1 ../windows-config/config.spmw.json /tmp/spmw-bootstrap/
+python3 -m http.server 10922 --bind 127.0.0.1 --directory /tmp/spmw-bootstrap
+```
+
+如果只需要服务已有目录，也可以直接使用：
+
+```bash
+python3 -m http.server 10922 --bind 127.0.0.1 --directory target
 ```
 
 如果 Windows 通过 SSH 访问 Linux，可以在 Windows 上建立本地端口转发：
@@ -60,7 +83,8 @@ powershell.exe -ExecutionPolicy Bypass -File .\bin\spmw-cli.ps1 prune
 
 命令说明：
 
-- `update`：解析配置和变量，写入 `~/.spmw/state/next-plan.json`。
+- `update`：从 `next-plan.json` 中的 `main.path` 推导入口配置，推进计划并写回 `~/.spmw/state/next-plan.json`。
+- `update -Bootstrap <path>`：使用指定 bootstrap config 作为首次入口，生成第一版 `next-plan.json`。
 - `install`：安装 next plan 并激活。
 - `install -Prepare`：只准备/安装对象，不激活。
 - `prune`：清理未使用对象。可用 `-Pkgs`、`-Fonts`、`-Cache` 限定范围。
@@ -93,6 +117,12 @@ GitHub Actions 会创建 release，并上传：
 - `tarball.tar.gz`
 - `sha256.txt`
 - `VERSION.txt`
+
+也可以本地生成同样格式的 release 产物：
+
+```bash
+GITHUB_REF_NAME=v1.0.0 scripts/make-dist.sh release dist
+```
 
 生产配置先读取：
 

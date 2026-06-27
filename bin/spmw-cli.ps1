@@ -1,6 +1,7 @@
 param(
     [ValidateSet("update", "install", "prune")]
     [string]$Command = "update",
+    [string]$Bootstrap,
     [switch]$Prepare,
     [switch]$Hack,
     [switch]$Pkgs,
@@ -22,7 +23,6 @@ $Script:PlanRoot = Join-Path $Script:StateRoot "plan"
 $Script:ScratchRoot = Join-Path $Script:ConfigRoot ".tmp"
 $Script:NextPlanPath = Join-Path $Script:StateRoot "next-plan.json"
 $Script:LockPath = Join-Path $Script:StateRoot "lock.json"
-$Script:LocalConfigPath = Join-Path $env:USERPROFILE ".config.spmw.json"
 
 $Script:Roots = @{
     user = $env:USERPROFILE
@@ -400,7 +400,7 @@ function Resolve-Variables {
 
     $normalizedPackage = Normalize-Package -Package $Package
     $variables = [ordered]@{}
-    $variables["manifest-digest"] = (Get-TextSha256 -Text (ConvertTo-StableJson $normalizedPackage)).Substring(0, 16)
+    $variables["manifest-digest"] = Get-TextSha256 -Text (ConvertTo-StableJson $normalizedPackage)
 
     if (Test-Property -Value $normalizedPackage -Name "variables") {
         foreach ($group in @($normalizedPackage.variables)) {
@@ -428,20 +428,9 @@ function Resolve-Variables {
         }
     }
 
-    $variables["variable-digest"] = (Get-TextSha256 -Text (ConvertTo-StableJson $variables)).Substring(0, 16)
+    $variables["variable-digest"] = Get-TextSha256 -Text (ConvertTo-StableJson $variables)
+    $variables["path"] = "pkgs/$PackageName.$($variables["variable-digest"].Substring(0, 16))"
     return $variables
-}
-
-function Get-PackageManifestHash {
-    param(
-        [Parameter(Mandatory)]$Package,
-        [Parameter(Mandatory)]$Variables
-    )
-
-    return (Get-TextSha256 -Text (ConvertTo-StableJson ([ordered]@{
-        package = Normalize-Package -Package $Package
-        variables = $Variables
-    }))).Substring(0, 16)
 }
 
 function Expand-ArchiveWithTar {
@@ -906,13 +895,15 @@ function Initialize-Workspace {
 }
 
 function Get-LocalConfig {
-    if (-not (Test-Path -LiteralPath $Script:LocalConfigPath)) {
-        throw "Missing local config: $Script:LocalConfigPath"
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Missing local config: $Path"
     }
 
-    $config = Get-Json -Path $Script:LocalConfigPath
+    $config = Get-Json -Path $Path
     if (-not (Test-Property -Value $config -Name "packages") -or -not (Test-Property -Value $config.packages -Name "main")) {
-        throw "Local config is missing packages.main: $Script:LocalConfigPath"
+        throw "Local config is missing packages.main: $Path"
     }
 
     return $config
@@ -958,16 +949,41 @@ function Merge-Config {
     }
 }
 
+function Get-NextPlanMainConfigPath {
+    if (-not (Test-Path -LiteralPath $Script:NextPlanPath)) {
+        throw "Missing next plan: run update -Bootstrap <path> first"
+    }
+
+    $nextPlan = Get-Json -Path $Script:NextPlanPath
+    if (-not (Test-Property -Value $nextPlan -Name "packages") -or
+        -not (Test-Property -Value $nextPlan.packages -Name "main") -or
+        -not (Test-Property -Value $nextPlan.packages.main -Name "variables") -or
+        -not (Test-Property -Value $nextPlan.packages.main.variables -Name "path")) {
+        throw "next plan is missing packages.main.variables.path"
+    }
+
+    return Resolve-ObjectPath "object:$($nextPlan.packages.main.variables.path)/config.spmw.json"
+}
+
 function Install-MainPackage {
     param(
         [Parameter(Mandatory)]$Package,
         [Parameter(Mandatory)]$Variables
     )
 
-    $hash = Get-PackageManifestHash -Package $Package -Variables $Variables
-    $final = Join-Path $Script:PackageRoot "main.$hash"
+    if (-not (Test-MapKey -Map $Variables -Key "path")) {
+        throw "main variables missing path"
+    }
+    if (-not (Test-MapKey -Map $Variables -Key "variable-digest")) {
+        throw "main variables missing variable-digest"
+    }
+
+    $path = [string]$Variables["path"]
+    $hash = [string]$Variables["variable-digest"]
+    $object = "object:$path"
+    $final = Resolve-ObjectPath "object:$path"
     if ((Test-Path -LiteralPath $final) -and (Test-Path -LiteralPath (Join-Path $final ".READY"))) {
-        return [pscustomobject]@{ object = "object:pkgs/main.$hash"; path = $final; hash = $hash }
+        return [pscustomobject]@{ object = $object; path = $final; hash = $hash }
     }
 
     $tmp = Join-Path $Script:PackageRoot ".tmp.main.$hash"
@@ -1024,13 +1040,18 @@ function Install-MainPackage {
         fonts = @()
     }
     Commit-PackageDirectory -TempPath $tmp -FinalPath $final -Metadata $metadata
-    return [pscustomobject]@{ object = "object:pkgs/main.$hash"; path = $final; hash = $hash }
+    return [pscustomobject]@{ object = $object; path = $final; hash = $hash }
 }
 
 function Invoke-Update {
     Initialize-Workspace
 
-    $localConfig = Get-LocalConfig
+    if (-not [string]::IsNullOrWhiteSpace($Bootstrap)) {
+        $localConfigPath = $Bootstrap
+    } else {
+        $localConfigPath = Get-NextPlanMainConfigPath
+    }
+    $localConfig = Get-LocalConfig -Path $localConfigPath
     $localFirst = $Hack -or -not [string]::IsNullOrWhiteSpace($env:SPMW_DEV_HOST)
     $mainPackage = Normalize-Package -Package $localConfig.packages.main
     $mainVariables = Resolve-Variables -PackageName "main" -Package $mainPackage
@@ -1041,7 +1062,11 @@ function Invoke-Update {
     }
 
     $remoteConfig = Get-Json -Path $configPath
-    $config = Merge-Config -Remote $remoteConfig -Local $localConfig -LocalFirst:$localFirst
+    $config = if ([string]::IsNullOrWhiteSpace($Bootstrap)) {
+        Merge-Config -Remote $remoteConfig -Local $localConfig -LocalFirst:$localFirst
+    } else {
+        $localConfig
+    }
     if (-not (Test-Property -Value $config -Name "packages")) {
         throw "merged config is missing packages"
     }
@@ -1100,9 +1125,16 @@ function Install-RegularPackage {
         [Parameter(Mandatory)]$Variables
     )
 
-    $hash = Get-PackageManifestHash -Package $Definition -Variables $Variables
-    $objectSpec = "object:pkgs/$Name.$hash"
-    $final = Join-Path $Script:PackageRoot "$Name.$hash"
+    if (-not (Test-MapKey -Map $Variables -Key "path")) {
+        throw "Package $Name variables missing path"
+    }
+    if (-not (Test-MapKey -Map $Variables -Key "variable-digest")) {
+        throw "Package $Name variables missing variable-digest"
+    }
+
+    $hash = [string]$Variables["variable-digest"]
+    $objectSpec = "object:$($Variables["path"])"
+    $final = Resolve-ObjectPath $objectSpec
     if ((Test-Path -LiteralPath $final) -and (Test-Path -LiteralPath (Join-Path $final ".READY"))) {
         $metadataPath = Join-Path $final ".spmw\metadata.json"
         $metadataResources = @()
@@ -1203,8 +1235,9 @@ function Invoke-Install {
         $resources += @($result.resources)
     }
 
+    $inputLinks = if (Test-Property -Value $input -Name "links") { $input.links } else { [pscustomobject]@{} }
     $links = @()
-    foreach ($link in @($input.links.PSObject.Properties | Sort-Object Name)) {
+    foreach ($link in @($inputLinks.PSObject.Properties | Sort-Object Name)) {
         $links += [pscustomobject]@{
             kind = "link"
             key = "link:$($link.Name)"
