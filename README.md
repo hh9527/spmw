@@ -38,14 +38,14 @@ scripts/make-dist.sh dev target
 
 `dev` 模式会生成：
 
-- `target/tarball.<sha256>.tar.gz`
-- `target/sha256.txt`
+- `target/spmw.<sha256>.tar.gz`
+- `target/spmw.tar.gz.sha256`
 
 `windows-config/bootstrap.ps1` 的 dev 模式还需要同一个 HTTP 根下存在 `bootstrap.ps1` 和 `config.spmw.json`。可以准备一个 staging 目录：
 
 ```bash
 mkdir -p /tmp/spmw-bootstrap
-cp target/tarball.*.tar.gz target/sha256.txt /tmp/spmw-bootstrap/
+cp target/spmw.*.tar.gz target/spmw.tar.gz.sha256 /tmp/spmw-bootstrap/
 cp ../windows-config/bootstrap.ps1 ../windows-config/config.spmw.json /tmp/spmw-bootstrap/
 python3 -m http.server 10922 --bind 127.0.0.1 --directory /tmp/spmw-bootstrap
 ```
@@ -114,8 +114,8 @@ git push origin v1.0.0
 
 GitHub Actions 会创建 release，并上传：
 
-- `tarball.tar.gz`
-- `sha256.txt`
+- `spmw.tar.gz`
+- `spmw.tar.gz.sha256`
 - `VERSION.txt`
 
 也可以本地生成同样格式的 release 产物：
@@ -130,5 +130,5 @@ GITHUB_REF_NAME=v1.0.0 scripts/make-dist.sh release dist
 
 然后使用具体版本的稳定 URL 下载和校验：
 
-- `https://github.com/hh9527/spmw/releases/download/<version>/tarball.tar.gz`
-- `https://github.com/hh9527/spmw/releases/download/<version>/sha256.txt`
+- `https://github.com/hh9527/spmw/releases/download/<version>/spmw.tar.gz`
+- `https://github.com/hh9527/spmw/releases/download/<version>/spmw.tar.gz.sha256`

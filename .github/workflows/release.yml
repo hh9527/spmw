@@ -24,6 +24,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           files: |
-            dist/tarball.tar.gz
-            dist/sha256.txt
+            dist/spmw.tar.gz
+            dist/spmw.tar.gz.sha256
             dist/VERSION.txt

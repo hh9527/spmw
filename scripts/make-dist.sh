@@ -34,16 +34,16 @@ fi
 
 mkdir -p "$target_dir"
 
-tmp_tarball="$target_dir/.tmp.tarball.tar.gz"
+tmp_tarball="$target_dir/.tmp.spmw.tar.gz"
 rm -f "$tmp_tarball"
 
 tar -C "$repo_root" -czf "$tmp_tarball" bin
 sha="$(sha256sum "$tmp_tarball" | awk '{ print $1 }')"
-printf '%s\n' "$sha" > "$target_dir/sha256.txt"
+printf '%s\n' "$sha" > "$target_dir/spmw.tar.gz.sha256"
 
 case "$mode" in
   release)
-    mv "$tmp_tarball" "$target_dir/tarball.tar.gz"
+    mv "$tmp_tarball" "$target_dir/spmw.tar.gz"
     version="${GITHUB_REF_NAME:-}"
     if [[ -z "$version" ]]; then
       version="$(git -C "$repo_root" describe --tags --exact-match 2>/dev/null || true)"
@@ -53,15 +53,15 @@ case "$mode" in
       exit 1
     fi
     printf '%s\n' "$version" > "$target_dir/VERSION.txt"
-    echo "wrote $target_dir/tarball.tar.gz"
-    echo "wrote $target_dir/sha256.txt"
+    echo "wrote $target_dir/spmw.tar.gz"
+    echo "wrote $target_dir/spmw.tar.gz.sha256"
     echo "wrote $target_dir/VERSION.txt"
     ;;
   dev)
-    tarball="$target_dir/tarball.$sha.tar.gz"
-    rm -f "$target_dir"/tarball.*.tar.gz
+    tarball="$target_dir/spmw.$sha.tar.gz"
+    rm -f "$target_dir"/spmw.*.tar.gz
     mv "$tmp_tarball" "$tarball"
     echo "wrote $tarball"
-    echo "wrote $target_dir/sha256.txt"
+    echo "wrote $target_dir/spmw.tar.gz.sha256"
     ;;
 esac
