@@ -127,6 +127,20 @@ function ConvertTo-Hashtable {
     return $table
 }
 
+function Get-PackagePropertiesInOrder {
+    param([Parameter(Mandatory)]$Packages)
+
+    return @($Packages.PSObject.Properties | Sort-Object @{
+        Expression = {
+            switch ($_.Name) {
+                "main" { 0; break }
+                "spmw" { 1; break }
+                default { 2 }
+            }
+        }
+    }, Name)
+}
+
 function Save-JsonAtomic {
     param(
         [Parameter(Mandatory)]$Value,
@@ -1196,7 +1210,7 @@ function Invoke-Update {
     }
 
     $packages = [ordered]@{}
-    foreach ($packageProperty in @($config.packages.PSObject.Properties | Sort-Object Name)) {
+    foreach ($packageProperty in Get-PackagePropertiesInOrder -Packages $config.packages) {
         $definition = Normalize-Package -Package $packageProperty.Value
         $variables = Resolve-Variables -PackageName $packageProperty.Name -Package $definition
         $packages[$packageProperty.Name] = [ordered]@{
@@ -1344,7 +1358,7 @@ function Invoke-Install {
     $planPackages = [ordered]@{}
     $resources = @()
 
-    foreach ($packageProperty in @($input.packages.PSObject.Properties | Sort-Object Name)) {
+    foreach ($packageProperty in Get-PackagePropertiesInOrder -Packages $input.packages) {
         $name = $packageProperty.Name
         $entry = $packageProperty.Value
         if (-not (Test-Property -Value $config.packages -Name $name)) {
