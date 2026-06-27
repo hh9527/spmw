@@ -84,13 +84,11 @@ powershell.exe -ExecutionPolicy Bypass -File .\bin\spmw-cli.ps1 prune
 命令说明：
 
 - `update`：从 `next-plan.json` 中的 `main.path` 推导入口配置，推进计划并写回 `~/.spmw/state/next-plan.json`。
-- `update -Bootstrap <path>`：使用指定 bootstrap config 作为首次入口，生成第一版 `next-plan.json`。
 - `install`：安装 next plan 并激活。
 - `install -Prepare`：只准备/安装对象，不激活。
 - `prune`：清理未使用对象。可用 `-Pkgs`、`-Fonts`、`-Cache` 限定范围。
-- `update -Hack`：调试用，本地配置覆盖远端配置。
 
-如果没有 `-Hack`，并且没有 `SPMW_DEV_HOST`，则默认远端 `main/config.spmw.json` 优先，覆盖本地同名的 `packages`、`links`、`shortcuts`。
+`update` 会以远端 `main/config.spmw.json` 优先，覆盖入口配置中同名的 `packages`、`links`、`shortcuts`。
 
 ## 代理
 

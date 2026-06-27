@@ -1,9 +1,9 @@
 param(
     [ValidateSet("update", "install", "prune")]
-    [string]$Command = "update",
+    [string]$Command,
     [string]$Bootstrap,
+    [switch]$Help,
     [switch]$Prepare,
-    [switch]$Hack,
     [switch]$Pkgs,
     [switch]$Fonts,
     [switch]$Cache
@@ -36,6 +36,23 @@ function Ensure-Command {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "Missing required command: $Name"
     }
+}
+
+function Show-Help {
+    Write-Host @"
+spmw-cli.ps1 update
+spmw-cli.ps1 install [-Prepare]
+spmw-cli.ps1 prune [-Pkgs] [-Fonts] [-Cache]
+spmw-cli.ps1 -Help
+
+Commands:
+  update   Resolve config and variables, then write next-plan.json.
+  install  Install next-plan.json and activate it unless -Prepare is set.
+  prune    Remove unused plans/resources; scope with -Pkgs, -Fonts, -Cache.
+
+Options:
+  -Prepare           Install objects without activation.
+"@
 }
 
 function Ensure-Directory {
@@ -934,18 +951,14 @@ function Merge-ConfigSection {
 function Merge-Config {
     param(
         [Parameter(Mandatory)]$Remote,
-        [Parameter(Mandatory)]$Local,
-        [switch]$LocalFirst
+        [Parameter(Mandatory)]$Local
     )
 
-    $base = if ($LocalFirst) { $Remote } else { $Local }
-    $overlay = if ($LocalFirst) { $Local } else { $Remote }
-
     return [pscustomobject]@{
-        schema = if (Test-Property -Value $overlay -Name "schema") { $overlay.schema } else { $base.schema }
-        packages = Merge-ConfigSection -Base $base -Overlay $overlay -Name "packages"
-        links = Merge-ConfigSection -Base $base -Overlay $overlay -Name "links"
-        shortcuts = Merge-ConfigSection -Base $base -Overlay $overlay -Name "shortcuts"
+        schema = if (Test-Property -Value $Remote -Name "schema") { $Remote.schema } else { $Local.schema }
+        packages = Merge-ConfigSection -Base $Local -Overlay $Remote -Name "packages"
+        links = Merge-ConfigSection -Base $Local -Overlay $Remote -Name "links"
+        shortcuts = Merge-ConfigSection -Base $Local -Overlay $Remote -Name "shortcuts"
     }
 }
 
@@ -1052,7 +1065,6 @@ function Invoke-Update {
         $localConfigPath = Get-NextPlanMainConfigPath
     }
     $localConfig = Get-LocalConfig -Path $localConfigPath
-    $localFirst = $Hack -or -not [string]::IsNullOrWhiteSpace($env:SPMW_DEV_HOST)
     $mainPackage = Normalize-Package -Package $localConfig.packages.main
     $mainVariables = Resolve-Variables -PackageName "main" -Package $mainPackage
     $main = Install-MainPackage -Package $mainPackage -Variables $mainVariables
@@ -1063,7 +1075,7 @@ function Invoke-Update {
 
     $remoteConfig = Get-Json -Path $configPath
     $config = if ([string]::IsNullOrWhiteSpace($Bootstrap)) {
-        Merge-Config -Remote $remoteConfig -Local $localConfig -LocalFirst:$localFirst
+        Merge-Config -Remote $remoteConfig -Local $localConfig
     } else {
         $localConfig
     }
@@ -1407,6 +1419,11 @@ function Invoke-Prune {
     }
 
     Write-Host "prune complete"
+}
+
+if ($Help -or [string]::IsNullOrWhiteSpace($Command)) {
+    Show-Help
+    exit 0
 }
 
 switch ($Command) {
