@@ -61,6 +61,13 @@ function Ensure-Directory {
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
 }
 
+function Clear-Scratch {
+    if (Test-Path -LiteralPath $Script:ScratchRoot) {
+        Remove-Item -LiteralPath $Script:ScratchRoot -Recurse -Force
+    }
+    Ensure-Directory $Script:ScratchRoot
+}
+
 function Join-PathParts {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -129,8 +136,73 @@ function Save-JsonAtomic {
     Ensure-Directory (Split-Path -Parent $Path)
     $name = Split-Path -Leaf $Path
     $tmp = Join-Path (Split-Path -Parent $Path) ".tmp.$name"
-    $Value | ConvertTo-Json -Depth 80 | Set-Content -Encoding UTF8 -Path $tmp
+    Set-Content -Encoding UTF8 -Path $tmp -Value (ConvertTo-PrettyJson -Value $Value)
     Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+function ConvertTo-PrettyJson {
+    param(
+        [Parameter(Mandatory)]$Value,
+        [int]$Level = 0
+    )
+
+    $indent = "  " * $Level
+    $childIndent = "  " * ($Level + 1)
+
+    if ($null -eq $Value) {
+        return "null"
+    }
+
+    if ($Value -is [string]) {
+        return ($Value | ConvertTo-Json -Compress)
+    }
+
+    if ($Value -is [bool]) {
+        if ($Value) { return "true" }
+        return "false"
+    }
+
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) {
+        return ([string]::Format([System.Globalization.CultureInfo]::InvariantCulture, "{0}", $Value))
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [System.Collections.IDictionary]) -and -not ($Value -is [pscustomobject])) {
+        $items = @($Value)
+        if ($items.Count -eq 0) {
+            return "[]"
+        }
+        $lines = @("[")
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $suffix = if ($i -lt $items.Count - 1) { "," } else { "" }
+            $lines += $childIndent + (ConvertTo-PrettyJson -Value $items[$i] -Level ($Level + 1)) + $suffix
+        }
+        $lines += "$indent]"
+        return ($lines -join "`n")
+    }
+
+    $props = if ($Value -is [System.Collections.IDictionary]) {
+        $Value.Keys | ForEach-Object {
+            [pscustomobject]@{ Name = $_; Value = $Value[$_] }
+        }
+    } else {
+        $Value.PSObject.Properties |
+            Where-Object { $_.MemberType -eq "NoteProperty" -or $_.MemberType -eq "Property" }
+    }
+    $props = @($props)
+    if ($props.Count -eq 0) {
+        return "{}"
+    }
+
+    $lines = @("{")
+    for ($i = 0; $i -lt $props.Count; $i++) {
+        $property = $props[$i]
+        $suffix = if ($i -lt $props.Count - 1) { "," } else { "" }
+        $name = ([string]$property.Name | ConvertTo-Json -Compress)
+        $valueJson = ConvertTo-PrettyJson -Value $property.Value -Level ($Level + 1)
+        $lines += "$childIndent$name`: $valueJson$suffix"
+    }
+    $lines += "$indent}"
+    return ($lines -join "`n")
 }
 
 function Get-FileSha256 {
@@ -1104,6 +1176,7 @@ function Invoke-Update {
 
     Save-JsonAtomic -Value $nextPlan -Path $Script:NextPlanPath
     Write-Host "wrote $Script:NextPlanPath"
+    Clear-Scratch
 }
 
 function Get-ActionDownload {
@@ -1300,6 +1373,7 @@ function Invoke-Install {
         Invoke-ActivatePlan -PlanPath $planPath
     }
 
+    Clear-Scratch
     return [pscustomobject]@{
         id = $id
         path = $planPath
