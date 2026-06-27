@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build assets
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          tar -czf dist/tarball.tar.gz bin
+          sha256sum dist/tarball.tar.gz | awk '{ print $1 }' > dist/sha256.txt
+          printf '%s\n' "$version" > dist/VERSION.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: |
+            dist/tarball.tar.gz
+            dist/sha256.txt
+            dist/VERSION.txt
