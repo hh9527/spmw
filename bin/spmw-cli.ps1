@@ -142,7 +142,7 @@ function Save-JsonAtomic {
 
 function ConvertTo-PrettyJson {
     param(
-        [Parameter(Mandatory)]$Value,
+        $Value,
         [int]$Level = 0
     )
 
@@ -251,7 +251,7 @@ function Get-TextSha256 {
 }
 
 function ConvertTo-StableJson {
-    param([Parameter(Mandatory)]$Value)
+    param($Value)
 
     if ($null -eq $Value) {
         return "null"
