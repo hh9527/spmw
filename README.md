@@ -29,7 +29,7 @@ irm "https://github.com/hh9527/spmw/releases/latest/download/bootstrap.ps1" | ie
 如果需要让 bootstrap 下载入口也走 curl 代理环境变量，可以用：
 
 ```powershell
-curl.exe -fL "https://github.com/hh9527/spmw/releases/latest/download/bootstrap.ps1" | iex
+((curl.exe -fL "https://github.com/hh9527/spmw/releases/latest/download/bootstrap.ps1") -join "`n") | iex
 ```
 
 bootstrap 先下载临时 CLI，再用临时 CLI 添加 `source.spmw`、执行
@@ -93,7 +93,7 @@ irm "http://127.0.0.1:10922/latest/bootstrap.ps1" | iex
 
 ```powershell
 $env:SPMW_SOURCE_URL = "http://127.0.0.1:10922/spmw/latest"
-curl.exe -fL "http://127.0.0.1:10922/latest/bootstrap.ps1" | iex
+((curl.exe -fL "http://127.0.0.1:10922/latest/bootstrap.ps1") -join "`n") | iex
 ```
 
 本地 source 也可以显式写成：
