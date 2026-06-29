@@ -85,6 +85,7 @@ case "$mode" in
     version_dir="$target_dir/$version"
     spmw_dir="$target_dir/spmw"
     rm -rf "$latest_dir" "$version_dir" "$spmw_dir"
+    rm -f "$target_dir/bootstrap.ps1"
     find "$target_dir" -maxdepth 1 -type l -name 'unrelease-*' -delete
     mkdir -p "$latest_dir"
     mv "$tmp_tarball" "$latest_dir/spmw.tar.gz"
@@ -93,13 +94,11 @@ case "$mode" in
     cp "$repo_root/bootstrap.ps1" "$latest_dir/bootstrap.ps1"
     ln -s latest "$version_dir"
     ln -s . "$spmw_dir"
-    cp "$repo_root/bootstrap.ps1" "$target_dir/bootstrap.ps1"
     echo "wrote $latest_dir/spmw.tar.gz"
     echo "wrote $latest_dir/spmw.tar.gz.sha256"
     echo "wrote $latest_dir/VERSION.txt"
     echo "wrote $latest_dir/bootstrap.ps1"
     echo "linked $version_dir -> latest"
     echo "linked $spmw_dir -> ."
-    echo "wrote $target_dir/bootstrap.ps1"
     ;;
 esac

@@ -1150,6 +1150,43 @@ function Merge-ConfigFragments {
     }
 }
 
+function Resolve-SourceLocalPackageTarget {
+    param(
+        [Parameter(Mandatory)][string]$Spec,
+        [Parameter(Mandatory)][string]$SourceName
+    )
+
+    if ($Spec -match "^pkgs\.source($|:)") {
+        return $Spec -replace "^pkgs\.source", "pkgs.$SourceName"
+    }
+    return $Spec
+}
+
+function Resolve-SourceLocalConfig {
+    param(
+        [Parameter(Mandatory)]$Config,
+        [Parameter(Mandatory)][string]$SourceName
+    )
+
+    if (Test-Property -Value $Config -Name "links") {
+        foreach ($property in @($Config.links.PSObject.Properties)) {
+            $property.Value = Resolve-SourceLocalPackageTarget -Spec ([string]$property.Value) -SourceName $SourceName
+        }
+    }
+    if (Test-Property -Value $Config -Name "shortcuts") {
+        foreach ($property in @($Config.shortcuts.PSObject.Properties)) {
+            $shortcut = $property.Value
+            if (Test-Property -Value $shortcut -Name "program") {
+                $shortcut.program = Resolve-SourceLocalPackageTarget -Spec ([string]$shortcut.program) -SourceName $SourceName
+            }
+            if (Test-Property -Value $shortcut -Name "cwd") {
+                $shortcut.cwd = Resolve-SourceLocalPackageTarget -Spec ([string]$shortcut.cwd) -SourceName $SourceName
+            }
+        }
+    }
+    return $Config
+}
+
 function Get-SourcesFile {
     if (-not (Test-Path -LiteralPath $Script:SourcesPath)) {
         throw "Missing sources file: $Script:SourcesPath"
@@ -1252,7 +1289,7 @@ function Invoke-Update {
         if (-not (Test-Path -LiteralPath $configPath)) {
             throw "Missing source config for $sourceName`: $configPath"
         }
-        $fragments += Get-Json -Path $configPath
+        $fragments += Resolve-SourceLocalConfig -Config (Get-Json -Path $configPath) -SourceName $sourceName
     }
 
     $config = Merge-ConfigFragments -Fragments $fragments
@@ -1430,7 +1467,7 @@ function Invoke-Install {
         if (-not (Test-Path -LiteralPath $configPath)) {
             throw "Missing source config for $sourceKey`: $configPath"
         }
-        $fragments += Get-Json -Path $configPath
+        $fragments += Resolve-SourceLocalConfig -Config (Get-Json -Path $configPath) -SourceName $sourceKey
     }
     $config = Merge-ConfigFragments -Fragments $fragments
 

@@ -59,14 +59,12 @@ scripts/make-dist.sh dev
 - `dev-dist/latest/bootstrap.ps1`
 - `dev-dist/unrelease-<hash9> -> latest`
 - `dev-dist/spmw -> .`
-- `dev-dist/bootstrap.ps1`
 
 可以准备一个 staging 目录：
 
 ```bash
 mkdir -p /tmp/spmw-bootstrap
 cp -r dev-dist/latest dev-dist/unrelease-* /tmp/spmw-bootstrap/
-cp dev-dist/bootstrap.ps1 /tmp/spmw-bootstrap/
 python3 -m http.server 10922 --bind 127.0.0.1 --directory /tmp/spmw-bootstrap
 ```
 

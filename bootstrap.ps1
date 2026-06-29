@@ -3,6 +3,7 @@ Set-StrictMode -Version Latest
 
 $spmwRoot = Join-Path $env:USERPROFILE ".spmw"
 $bootstrapRoot = Join-Path $spmwRoot "bootstrap"
+$userBinRoot = Join-Path $env:USERPROFILE ".local\bin"
 
 function Ensure-Directory {
     param([Parameter(Mandatory)][string]$Path)
@@ -37,7 +38,59 @@ function Get-Text {
     return ([string]::Join("`n", @($text))).Trim()
 }
 
+function Ensure-UserPathEntry {
+    param([Parameter(Mandatory)][string]$Path)
+
+    Ensure-Directory $Path
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd("\")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $entries = @()
+    if (-not [string]::IsNullOrWhiteSpace($userPath)) {
+        $entries = @($userPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+
+    $exists = $false
+    foreach ($entry in $entries) {
+        try {
+            $entryFullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($entry)).TrimEnd("\")
+        } catch {
+            $entryFullPath = $entry.TrimEnd("\")
+        }
+        if ([string]::Equals($entryFullPath, $fullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $exists = $true
+            break
+        }
+    }
+
+    if (-not $exists) {
+        $newUserPath = if ($entries.Count -gt 0) {
+            (@($entries) + $fullPath) -join ";"
+        } else {
+            $fullPath
+        }
+        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+    }
+
+    $processEntries = @($env:PATH -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $processExists = $false
+    foreach ($entry in $processEntries) {
+        try {
+            $entryFullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($entry)).TrimEnd("\")
+        } catch {
+            $entryFullPath = $entry.TrimEnd("\")
+        }
+        if ([string]::Equals($entryFullPath, $fullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $processExists = $true
+            break
+        }
+    }
+    if (-not $processExists) {
+        $env:PATH = if ([string]::IsNullOrWhiteSpace($env:PATH)) { $fullPath } else { "$env:PATH;$fullPath" }
+    }
+}
+
 Ensure-Directory $bootstrapRoot
+Ensure-UserPathEntry -Path $userBinRoot
 
 $sourceUrl = [string]$env:SPMW_SOURCE_URL
 if ([string]::IsNullOrWhiteSpace($sourceUrl)) {
@@ -87,7 +140,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "spmw install failed"
 }
 
-$cli = Join-Path $env:USERPROFILE ".local\bin\spmw-cli.ps1"
+$cli = Join-Path $userBinRoot "spmw-cli.ps1"
 & powershell.exe -ExecutionPolicy Bypass -File $cli update
 if ($LASTEXITCODE -ne 0) {
     throw "formal spmw update failed"
