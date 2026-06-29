@@ -2,40 +2,55 @@
 
 Simple Package Manager for Windows.
 
-`spmw` 是能力层：负责下载包输入、解析变量、生成 plan、安装 package，并激活 links、shortcuts、fonts、registry 等资源。配置来源由本地 `~/sources.spmw.json` 声明，每个 source 物化出一个 `config.spmw.json`。
+`spmw` 是配置驱动的极简包管理器，用于个人 Windows 工作环境的可重复搭建。
+它负责下载输入、解析变量、生成计划、安装 package，并激活 links、shortcuts、
+fonts、registry 等资源。
 
-## 目录结构
+## 定位
 
-- `bin/spmw-cli.ps1`：Windows CLI。
-- `bootstrap.ps1`：安装最小 `source.spmw` 并建立 spmw 自举闭环。
-- `source/config.spmw.json`：`source.spmw` 的最小自管理配置。
-- `scripts/make-dist.sh`：生成 release/dev 分发产物。
-- `.github/workflows/release.yml`：基于 version tag 构建 release assets。
+- 配置驱动的极简包管理。
+- 用于个人工作环境的可重复搭建。
+- 不追求通用软件仓库；更适合管理自己的常用工具和配置。
 
-运行时状态固定在：
+## 特性
 
-- `~/.spmw/state/next-plan.json`：当前计划游标。
-- `~/.spmw`：object store、plan、downloads、package objects 和临时目录。
-- `~/sources.spmw.json`：本机 source-ref authority。
+- 可被组合复用：配置以 source 形式组织，可以分享，也可以按顺序叠加。
+- 声明式：在 `config.spmw.json` 中声明 packages、links、shortcuts。
+- 适用于绿色软件、字体、简单命令行工具和个人配置文件。
+- 可重复：`update` 生成“将是”状态，`install` 按计划安装和激活。
 
-## Bootstrap
+## 用法
 
-生产 bootstrap 入口由本仓库 release asset 提供：
+### 开始
+
+在 PowerShell 中执行：
 
 ```powershell
 irm "https://github.com/hh9527/spmw/releases/latest/download/bootstrap.ps1" | iex
 ```
 
-如果需要让 bootstrap 下载入口也走 curl 代理环境变量，可以用：
+如果需要让 bootstrap 入口也走 curl 代理环境变量：
 
 ```powershell
 ((curl.exe -fL "https://github.com/hh9527/spmw/releases/latest/download/bootstrap.ps1") -join "`n") | iex
 ```
 
-bootstrap 先下载临时 CLI，再用临时 CLI 添加 `source.spmw`、执行
-`update` / `install`，随后切换到正式 `bin:spmw-cli.ps1` 再执行一次
-`update` / `install`。
-用户配置源不是 bootstrap 的一部分。bootstrap 完成后，可以添加自己的配置源：
+bootstrap 会安装最小 `source.spmw`，并把 `spmw-cli.ps1` 挂载到
+`~/.local/bin`。它也会确保 `~/.local/bin` 位于用户级 `Path` 中。
+
+### 更新
+
+```powershell
+spmw-cli.ps1 update
+spmw-cli.ps1 install
+```
+
+`update` 从 `~/sources.spmw.json` 解析 sources，生成
+`~/.spmw/state/next-plan.json`。`install` 安装该计划并激活外部资源。
+
+### 加入其他源
+
+例如加入一个 GitHub 配置仓：
 
 ```powershell
 spmw-cli.ps1 source add main gh-src:OWNER/REPO/main
@@ -43,89 +58,84 @@ spmw-cli.ps1 update
 spmw-cli.ps1 install
 ```
 
-source 按 `~/sources.spmw.json` 中的顺序合并，后面的 source 覆盖前面的同名 `packages`、`links`、`shortcuts`。
-
-本地开发时，可以生成 `spmw` 的 dev 分发产物：
-
-```bash
-scripts/make-dist.sh dev
-```
-
-`dev` 模式会生成：
-
-- `dev-dist/latest/spmw.tar.gz`
-- `dev-dist/latest/spmw.tar.gz.sha256`
-- `dev-dist/latest/VERSION.txt`
-- `dev-dist/latest/bootstrap.ps1`
-- `dev-dist/unrelease-<hash9> -> latest`
-- `dev-dist/spmw -> .`
-
-可以准备一个 staging 目录：
-
-```bash
-mkdir -p /tmp/spmw-bootstrap
-cp -r dev-dist/latest dev-dist/unrelease-* /tmp/spmw-bootstrap/
-python3 -m http.server 10922 --bind 127.0.0.1 --directory /tmp/spmw-bootstrap
-```
-
-如果只需要服务已有目录，也可以直接使用：
-
-```bash
-python3 -m http.server 10922 --bind 127.0.0.1 --directory dev-dist
-```
-
-如果 Windows 通过 SSH 访问 Linux，可以在 Windows 上建立本地端口转发：
+例如加入 `windows-config`：
 
 ```powershell
-ssh -N -T -L 10922:127.0.0.1:10922 lq-2
+spmw-cli.ps1 source add main gh-src:hh9527/windows-config/main
+spmw-cli.ps1 update
+spmw-cli.ps1 install
 ```
 
-然后在 Windows 上 bootstrap：
+也可以加入一个 HTTP release source：
 
 ```powershell
-$env:SPMW_SOURCE_URL = "http://127.0.0.1:10922/spmw/latest"
-irm "http://127.0.0.1:10922/latest/bootstrap.ps1" | iex
+spmw-cli.ps1 source add tools https://example.com/spmw/tools/latest
 ```
 
-也可以使用 curl 入口：
+source 按 `~/sources.spmw.json` 中的顺序合并；后面的 source 覆盖前面的同名
+`packages`、`links`、`shortcuts`。
+
+### 定义自己的源
+
+source 是一个能提供 `config.spmw.json` 的 package object。最常见方式是创建
+一个 GitHub 仓库，并在仓库根目录放置 `config.spmw.json`：
+
+```json
+{
+  "schema": 2,
+  "packages": {
+    "ripgrep": {
+      "defs": [
+        { "version": "14.1.1" }
+      ],
+      "install": [
+        {
+          "action": "Unpack",
+          "src": "https://github.com/BurntSushi/ripgrep/releases/download/<version>/ripgrep-<version>-x86_64-pc-windows-msvc.zip",
+          "strip": 1
+        }
+      ]
+    }
+  },
+  "links": {
+    "bin:rg.exe": "pkgs.ripgrep:rg.exe"
+  }
+}
+```
+
+然后加入这个源：
 
 ```powershell
-$env:SPMW_SOURCE_URL = "http://127.0.0.1:10922/spmw/latest"
-((curl.exe -fL "http://127.0.0.1:10922/latest/bootstrap.ps1") -join "`n") | iex
+spmw-cli.ps1 source add main gh-src:OWNER/REPO/main
 ```
 
-本地 source 也可以显式写成：
+source config 内可以用 `pkgs.source:<path>` 引用承载当前 config 的 source
+package object，例如：
 
-```powershell
-spmw-cli.ps1 source add spmw http://127.0.0.1:10922/spmw/latest
+```json
+{
+  "links": {
+    "user:.wezterm.lua": "pkgs.source:user/.wezterm.lua"
+  }
+}
 ```
 
-这种形式要求 HTTP 下存在 `/spmw/latest/VERSION.txt` 和对应 release assets，
-适合一个 server 同时伺服多个 release 根。
+## 命令
 
-## CLI
-
-在 PowerShell 中运行：
-
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\bin\spmw-cli.ps1 update
-powershell.exe -ExecutionPolicy Bypass -File .\bin\spmw-cli.ps1 install
-powershell.exe -ExecutionPolicy Bypass -File .\bin\spmw-cli.ps1 prune
-powershell.exe -ExecutionPolicy Bypass -File .\bin\spmw-cli.ps1 source add main gh-src:OWNER/REPO/main
-powershell.exe -ExecutionPolicy Bypass -File .\bin\spmw-cli.ps1 source add spmw https://github.com/hh9527/spmw/releases/download/latest
-powershell.exe -ExecutionPolicy Bypass -File .\bin\spmw-cli.ps1 source add spmw http://127.0.0.1:10922/spmw/latest
-```
-
-命令说明：
-
-- `source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>`：向 `~/sources.spmw.json` 追加或更新 GitHub source archive source。
-- `source add <name> http(s)://<BASE>/<VERSION>`：向 `~/sources.spmw.json` 追加或更新通用 HTTP release source。
-- `update`：从 `~/sources.spmw.json` 解析 source，合并配置，推进计划并写回 `~/.spmw/state/next-plan.json`。
+- `source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>`：追加或更新 GitHub source archive source。
+- `source add <name> http(s)://<BASE>/<VERSION>`：追加或更新 HTTP release source。
+- `update`：解析 sources，推进 `next-plan.json`。
 - `install`：安装 next plan 并激活。
-- `install -Prepare`：只准备/安装对象，不激活。
-- `prune`：清理未使用对象。可用 `-Pkgs`、`-Fonts`、`-Cache` 限定范围。
+- `install -Prepare`：只准备对象，不激活。
+- `prune`：回收不再使用的对象和 managed resources。可用 `-Pkgs`、`-Fonts`、`-Cache` 限定范围。
 
-`update` 按 source 顺序合并远端 `config.spmw.json`，后面的 source 覆盖前面的同名 `packages`、`links`、`shortcuts`。
+## 状态
+
+- `~/sources.spmw.json`：本机 source authority。
+- `~/.spmw/state/next-plan.json`：当前“将是”计划。
+- `~/.spmw/state/lock.json`：当前“应是”状态。
+- `~/.spmw/object/`：downloads、package objects、font objects。
+- `~/.local/bin`：默认命令挂载目录。
 
 ## 代理
 
@@ -136,40 +146,43 @@ $env:ALL_PROXY = "socks5h://127.0.0.1:1080"
 $env:NO_PROXY = "127.0.0.1,localhost"
 ```
 
-建议使用 `socks5h://`，这样 DNS 解析也会在代理端完成。
+## 本地开发
 
-## Release Assets
+生成 dev 分发产物：
 
-推送 version tag 会发布 `spmw` release assets：
+```bash
+scripts/make-dist.sh dev
+python3 -m http.server 10922 --bind 127.0.0.1 --directory dev-dist
+```
+
+Windows 侧：
+
+```powershell
+$env:SPMW_SOURCE_URL = "http://127.0.0.1:10922/spmw/latest"
+irm "http://127.0.0.1:10922/latest/bootstrap.ps1" | iex
+```
+
+dev 模式会生成：
+
+- `dev-dist/latest/spmw.tar.gz`
+- `dev-dist/latest/spmw.tar.gz.sha256`
+- `dev-dist/latest/VERSION.txt`
+- `dev-dist/latest/bootstrap.ps1`
+- `dev-dist/unrelease-<hash9> -> latest`
+- `dev-dist/spmw -> .`
+
+## 发布
+
+推送 version tag 会发布 release assets：
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-GitHub Actions 会创建 release，并上传：
+GitHub Actions 会上传：
 
 - `spmw.tar.gz`
 - `spmw.tar.gz.sha256`
 - `VERSION.txt`
 - `bootstrap.ps1`
-
-也可以本地生成同样格式的 release 产物：
-
-```bash
-GITHUB_REF_NAME=v1.0.0 scripts/make-dist.sh release dist
-```
-
-生产 bootstrap 默认 source URL 是：
-
-- `https://github.com/hh9527/spmw/releases/download/latest`
-
-它先读取：
-
-- `https://github.com/hh9527/spmw/releases/download/latest/VERSION.txt`
-
-然后使用具体版本的稳定 URL 下载和校验：
-
-- `https://github.com/hh9527/spmw/releases/download/<version>/spmw.tar.gz`
-- `https://github.com/hh9527/spmw/releases/download/<version>/spmw.tar.gz.sha256`
-- `https://github.com/hh9527/spmw/releases/latest/download/bootstrap.ps1`
