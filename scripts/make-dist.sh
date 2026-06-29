@@ -19,7 +19,7 @@ case "$mode" in
     target_dir="${2:-$repo_root/dist}"
     ;;
   dev)
-    target_dir="${2:-$repo_root/target}"
+    target_dir="${2:-$repo_root/dev-dist}"
     ;;
   *)
     usage
@@ -31,13 +31,33 @@ if [[ ! -d "$repo_root/bin" ]]; then
   echo "missing bin directory: $repo_root/bin" >&2
   exit 1
 fi
+if [[ ! -d "$repo_root/source" ]]; then
+  echo "missing source directory: $repo_root/source" >&2
+  exit 1
+fi
+if [[ ! -f "$repo_root/bootstrap.ps1" ]]; then
+  echo "missing bootstrap script: $repo_root/bootstrap.ps1" >&2
+  exit 1
+fi
 
 mkdir -p "$target_dir"
 
 tmp_tarball="$target_dir/.tmp.spmw.tar.gz"
+tmp_config_dir="$target_dir/.tmp.spmw-config"
 rm -f "$tmp_tarball"
+rm -f "$target_dir/spmw-source.tar.gz" "$target_dir/spmw-source.tar.gz.sha256"
+rm -rf "$tmp_config_dir"
 
-tar -C "$repo_root" -czf "$tmp_tarball" bin
+mkdir -p "$tmp_config_dir"
+cp "$repo_root/source/config.spmw.json" "$tmp_config_dir/config.spmw.json"
+if [[ "$mode" == "dev" ]]; then
+  sed -i \
+    -e 's#https://github.com/hh9527/spmw/releases/download/latest/VERSION.txt#http://127.0.0.1:10922/spmw/latest/VERSION.txt#' \
+    -e 's#https://github.com/hh9527/spmw/releases/download/#http://127.0.0.1:10922/spmw/#g' \
+    "$tmp_config_dir/config.spmw.json"
+fi
+tar -czf "$tmp_tarball" -C "$tmp_config_dir" config.spmw.json -C "$repo_root" bin
+rm -rf "$tmp_config_dir"
 sha="$(sha256sum "$tmp_tarball" | awk '{ print $1 }')"
 printf '%s\n' "$sha" > "$target_dir/spmw.tar.gz.sha256"
 
@@ -53,15 +73,33 @@ case "$mode" in
       exit 1
     fi
     printf '%s\n' "$version" > "$target_dir/VERSION.txt"
+    cp "$repo_root/bootstrap.ps1" "$target_dir/bootstrap.ps1"
     echo "wrote $target_dir/spmw.tar.gz"
     echo "wrote $target_dir/spmw.tar.gz.sha256"
     echo "wrote $target_dir/VERSION.txt"
+    echo "wrote $target_dir/bootstrap.ps1"
     ;;
   dev)
-    tarball="$target_dir/spmw.$sha.tar.gz"
-    rm -f "$target_dir"/spmw.*.tar.gz
-    mv "$tmp_tarball" "$tarball"
-    echo "wrote $tarball"
-    echo "wrote $target_dir/spmw.tar.gz.sha256"
+    version="unrelease-${sha:0:9}"
+    latest_dir="$target_dir/latest"
+    version_dir="$target_dir/$version"
+    spmw_dir="$target_dir/spmw"
+    rm -rf "$latest_dir" "$version_dir" "$spmw_dir"
+    find "$target_dir" -maxdepth 1 -type l -name 'unrelease-*' -delete
+    mkdir -p "$latest_dir"
+    mv "$tmp_tarball" "$latest_dir/spmw.tar.gz"
+    mv "$target_dir/spmw.tar.gz.sha256" "$latest_dir/spmw.tar.gz.sha256"
+    printf '%s\n' "$version" > "$latest_dir/VERSION.txt"
+    cp "$repo_root/bootstrap.ps1" "$latest_dir/bootstrap.ps1"
+    ln -s latest "$version_dir"
+    ln -s . "$spmw_dir"
+    cp "$repo_root/bootstrap.ps1" "$target_dir/bootstrap.ps1"
+    echo "wrote $latest_dir/spmw.tar.gz"
+    echo "wrote $latest_dir/spmw.tar.gz.sha256"
+    echo "wrote $latest_dir/VERSION.txt"
+    echo "wrote $latest_dir/bootstrap.ps1"
+    echo "linked $version_dir -> latest"
+    echo "linked $spmw_dir -> ."
+    echo "wrote $target_dir/bootstrap.ps1"
     ;;
 esac

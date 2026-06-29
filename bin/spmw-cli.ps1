@@ -1,7 +1,13 @@
 param(
-    [ValidateSet("update", "install", "prune")]
+    [Parameter(Position = 0)]
+    [ValidateSet("update", "install", "prune", "source")]
     [string]$Command,
-    [string]$Bootstrap,
+    [Parameter(Position = 1)]
+    [string]$SourceCommand,
+    [Parameter(Position = 2)]
+    [string]$SourceName,
+    [Parameter(Position = 3)]
+    [string]$SourceSpec,
     [switch]$Help,
     [switch]$Prepare,
     [switch]$Pkgs,
@@ -21,6 +27,7 @@ $Script:DownloadRoot = Join-Path $Script:ObjectRoot "dl"
 $Script:StateRoot = Join-Path $Script:ConfigRoot "state"
 $Script:PlanRoot = Join-Path $Script:StateRoot "plan"
 $Script:ScratchRoot = Join-Path $Script:ConfigRoot ".tmp"
+$Script:SourcesPath = Join-Path $env:USERPROFILE "sources.spmw.json"
 $Script:NextPlanPath = Join-Path $Script:StateRoot "next-plan.json"
 $Script:LockPath = Join-Path $Script:StateRoot "lock.json"
 
@@ -43,12 +50,14 @@ function Show-Help {
 spmw-cli.ps1 update
 spmw-cli.ps1 install [-Prepare]
 spmw-cli.ps1 prune [-Pkgs] [-Fonts] [-Cache]
+spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<BASE>/<VERSION>
 spmw-cli.ps1 -Help
 
 Commands:
   update   Resolve config and variables, then write next-plan.json.
   install  Install next-plan.json and activate it unless -Prepare is set.
   prune    Remove unused plans/resources; scope with -Pkgs, -Fonts, -Cache.
+  source   Manage local source refs.
 
 Options:
   -Prepare           Install objects without activation.
@@ -103,6 +112,63 @@ function Test-MapKey {
     return $Map.PSObject.Properties.Name -contains $Key
 }
 
+function Get-MapValue {
+    param(
+        [Parameter(Mandatory)]$Map,
+        [Parameter(Mandatory)][string]$Key
+    )
+
+    if ($Map -is [System.Collections.IDictionary]) {
+        return $Map[$Key]
+    }
+
+    $property = $Map.PSObject.Properties[$Key]
+    if ($null -eq $property) {
+        throw "Missing map key: $Key"
+    }
+    return $property.Value
+}
+
+function Test-PackageKey {
+    param([Parameter(Mandatory)][string]$Name)
+
+    return $Name -match "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+}
+
+function Test-SourceKey {
+    param([Parameter(Mandatory)][string]$Name)
+
+    return $Name -match "^source\.[A-Za-z0-9][A-Za-z0-9._-]*$"
+}
+
+function Assert-PackageKey {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [switch]$AllowSource
+    )
+
+    if (-not (Test-PackageKey -Name $Name)) {
+        throw "Invalid package key: $Name"
+    }
+    if (-not $AllowSource -and $Name.StartsWith("source.")) {
+        throw "Normal package key must not start with source.: $Name"
+    }
+}
+
+function Assert-SourceKey {
+    param([Parameter(Mandatory)][string]$Name)
+
+    if (-not (Test-SourceKey -Name $Name)) {
+        throw "Invalid source key: $Name"
+    }
+}
+
+function Test-SourceName {
+    param([Parameter(Mandatory)][string]$Name)
+
+    return $Name -match "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+}
+
 function Get-Json {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -125,20 +191,6 @@ function ConvertTo-Hashtable {
         $table[$property.Name] = $property.Value
     }
     return $table
-}
-
-function Get-PackagePropertiesInOrder {
-    param([Parameter(Mandatory)]$Packages)
-
-    return @($Packages.PSObject.Properties | Sort-Object @{
-        Expression = {
-            switch ($_.Name) {
-                "main" { 0; break }
-                "spmw" { 1; break }
-                default { 2 }
-            }
-        }
-    }, Name)
 }
 
 function Save-JsonAtomic {
@@ -533,10 +585,14 @@ function Resolve-Variables {
     $variables["manifest-digest"] = Get-TextSha256 -Text (ConvertTo-StableJson $normalizedPackage)
 
     if (Test-Property -Value $normalizedPackage -Name "variables") {
-        foreach ($group in @($normalizedPackage.variables)) {
+        throw "Package $PackageName uses obsolete declaration field: variables; use defs"
+    }
+
+    if (Test-Property -Value $normalizedPackage -Name "defs") {
+        foreach ($group in @($normalizedPackage.defs)) {
             $bindings = @($group.PSObject.Properties)
             if ($bindings.Count -ne 1) {
-                throw "Package $PackageName variable groups must contain exactly one binding"
+                throw "Package $PackageName defs groups must contain exactly one binding"
             }
 
             $binding = $bindings[0]
@@ -561,6 +617,26 @@ function Resolve-Variables {
     $variables["variable-digest"] = Get-TextSha256 -Text (ConvertTo-StableJson $variables)
     $variables["path"] = "pkgs/$PackageName.$($variables["variable-digest"].Substring(0, 16))"
     return $variables
+}
+
+function Assert-SourceDefinition {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)]$Definition
+    )
+
+    Assert-SourceKey -Name $Name
+    if (Test-Property -Value $Definition -Name "variables") {
+        throw "Source $Name uses obsolete declaration field: variables; use defs"
+    }
+    if (-not (Test-Property -Value $Definition -Name "install")) {
+        throw "Source $Name is missing install"
+    }
+    foreach ($action in @($Definition.install)) {
+        if ([string]$action.action -ne "Unpack") {
+            throw "Source $Name only supports Unpack install action"
+        }
+    }
 }
 
 function Expand-ArchiveWithTar {
@@ -1037,180 +1113,151 @@ function Initialize-Workspace {
     }
 }
 
-function Get-LocalConfig {
-    param([Parameter(Mandatory)][string]$Path)
+function Merge-ConfigFragments {
+    param([Parameter(Mandatory)]$Fragments)
 
-    if (-not (Test-Path -LiteralPath $Path)) {
-        throw "Missing local config: $Path"
-    }
+    $packages = [ordered]@{}
+    $links = [ordered]@{}
+    $shortcuts = [ordered]@{}
 
-    $config = Get-Json -Path $Path
-    if (-not (Test-Property -Value $config -Name "packages") -or -not (Test-Property -Value $config.packages -Name "main")) {
-        throw "Local config is missing packages.main: $Path"
-    }
-
-    return $config
-}
-
-function Merge-ConfigSection {
-    param(
-        [Parameter(Mandatory)]$Base,
-        [Parameter(Mandatory)]$Overlay,
-        [Parameter(Mandatory)][string]$Name
-    )
-
-    $merged = [ordered]@{}
-    if (Test-Property -Value $Base -Name $Name) {
-        foreach ($property in @($Base.$Name.PSObject.Properties | Sort-Object Name)) {
-            $merged[$property.Name] = $property.Value
+    foreach ($fragment in @($Fragments)) {
+        if (Test-Property -Value $fragment -Name "sources") {
+            throw "source config must not contain sources"
+        }
+        if (Test-Property -Value $fragment -Name "packages") {
+            foreach ($property in @($fragment.packages.PSObject.Properties | Sort-Object Name)) {
+                Assert-PackageKey -Name $property.Name
+                $packages[$property.Name] = $property.Value
+            }
+        }
+        if (Test-Property -Value $fragment -Name "links") {
+            foreach ($property in @($fragment.links.PSObject.Properties | Sort-Object Name)) {
+                $links[$property.Name] = $property.Value
+            }
+        }
+        if (Test-Property -Value $fragment -Name "shortcuts") {
+            foreach ($property in @($fragment.shortcuts.PSObject.Properties | Sort-Object Name)) {
+                $shortcuts[$property.Name] = $property.Value
+            }
         }
     }
-    if (Test-Property -Value $Overlay -Name $Name) {
-        foreach ($property in @($Overlay.$Name.PSObject.Properties | Sort-Object Name)) {
-            $merged[$property.Name] = $property.Value
-        }
-    }
-
-    return [pscustomobject]$merged
-}
-
-function Merge-Config {
-    param(
-        [Parameter(Mandatory)]$Remote,
-        [Parameter(Mandatory)]$Local
-    )
 
     return [pscustomobject]@{
-        schema = if (Test-Property -Value $Remote -Name "schema") { $Remote.schema } else { $Local.schema }
-        packages = Merge-ConfigSection -Base $Local -Overlay $Remote -Name "packages"
-        links = Merge-ConfigSection -Base $Local -Overlay $Remote -Name "links"
-        shortcuts = Merge-ConfigSection -Base $Local -Overlay $Remote -Name "shortcuts"
+        schema = 2
+        packages = [pscustomobject]$packages
+        links = [pscustomobject]$links
+        shortcuts = [pscustomobject]$shortcuts
     }
 }
 
-function Get-NextPlanMainConfigPath {
-    if (-not (Test-Path -LiteralPath $Script:NextPlanPath)) {
-        throw "Missing next plan: run update -Bootstrap <path> first"
+function Get-SourcesFile {
+    if (-not (Test-Path -LiteralPath $Script:SourcesPath)) {
+        throw "Missing sources file: $Script:SourcesPath"
     }
 
-    $nextPlan = Get-Json -Path $Script:NextPlanPath
-    if (-not (Test-Property -Value $nextPlan -Name "packages") -or
-        -not (Test-Property -Value $nextPlan.packages -Name "main") -or
-        -not (Test-Property -Value $nextPlan.packages.main -Name "variables") -or
-        -not (Test-Property -Value $nextPlan.packages.main.variables -Name "path")) {
-        throw "next plan is missing packages.main.variables.path"
+    $sourcesFile = Get-Json -Path $Script:SourcesPath
+    if (-not (Test-Property -Value $sourcesFile -Name "sources")) {
+        throw "sources file is missing sources: $Script:SourcesPath"
     }
-
-    return Resolve-ObjectPath "object:$($nextPlan.packages.main.variables.path)/config.spmw.json"
+    return $sourcesFile
 }
 
-function Install-MainPackage {
-    param(
-        [Parameter(Mandatory)]$Package,
-        [Parameter(Mandatory)]$Variables
-    )
+function Get-SourceDefinitions {
+    param([Parameter(Mandatory)]$SourcesFile)
+
+    $defs = [ordered]@{}
+    $order = @()
+    foreach ($source in @($SourcesFile.sources)) {
+        if (-not (Test-Property -Value $source -Name "name")) {
+            throw "source entry is missing name"
+        }
+        $name = [string]$source.name
+        Assert-SourceKey -Name $name
+        if (Test-MapKey -Map $defs -Key $name) {
+            throw "Duplicate source: $name"
+        }
+        $definition = [ordered]@{}
+        $definition["defs"] = if (Test-Property -Value $source -Name "defs") { @($source.defs) } else { @() }
+        if (-not (Test-Property -Value $source -Name "install")) {
+            throw "Source $name is missing install"
+        }
+        $definition["install"] = @($source.install)
+        $objectDefinition = [pscustomobject]$definition
+        Assert-SourceDefinition -Name $name -Definition $objectDefinition
+        $defs[$name] = $objectDefinition
+        $order += $name
+    }
+    if ($order.Count -eq 0) {
+        throw "sources file must contain at least one source"
+    }
+
+    return [pscustomobject]@{
+        order = @($order)
+        definitions = $defs
+    }
+}
+
+function Get-ConfigRPath {
+    param([Parameter(Mandatory)]$Variables)
+
+    $rpath = if (Test-MapKey -Map $Variables -Key "config-rpath") {
+        [string]$Variables["config-rpath"]
+    } else {
+        "config.spmw.json"
+    }
+    if ([string]::IsNullOrWhiteSpace($rpath)) {
+        throw "config-rpath must not be empty"
+    }
+    if ($rpath.StartsWith("/") -or $rpath.StartsWith("\")) {
+        throw "config-rpath must be relative: $rpath"
+    }
+    if ($rpath -match "^[A-Za-z]:") {
+        throw "config-rpath must not contain a drive letter: $rpath"
+    }
+    $parts = @($rpath -split "[\\/]+")
+    if ($parts -contains "..") {
+        throw "config-rpath must not contain .. segment: $rpath"
+    }
+    return $rpath
+}
+
+function Get-SourceConfigPath {
+    param([Parameter(Mandatory)]$Variables)
 
     if (-not (Test-MapKey -Map $Variables -Key "path")) {
-        throw "main variables missing path"
+        throw "source variables missing path"
     }
-    if (-not (Test-MapKey -Map $Variables -Key "variable-digest")) {
-        throw "main variables missing variable-digest"
-    }
-
-    $path = [string]$Variables["path"]
-    $hash = [string]$Variables["variable-digest"]
-    $object = "object:$path"
-    $final = Resolve-ObjectPath "object:$path"
-    if ((Test-Path -LiteralPath $final) -and (Test-Path -LiteralPath (Join-Path $final ".READY"))) {
-        return [pscustomobject]@{ object = $object; path = $final; hash = $hash }
-    }
-
-    $tmp = Join-Path $Script:PackageRoot ".tmp.main.$hash"
-    if (Test-Path -LiteralPath $tmp) {
-        Remove-Item -LiteralPath $tmp -Recurse -Force
-    }
-    Ensure-Directory $tmp
-
-    $downloads = @()
-    foreach ($action in @($Package.install)) {
-        if ([string]$action.action -ne "InstallMainConfig") {
-            throw "Unsupported main install action: $($action.action)"
-        }
-
-        $src = Expand-Template -Text ([string]$action.src) -Variables $Variables
-        $file = if (Test-Property -Value $action -Name "file") {
-            Expand-Template -Text ([string]$action.file) -Variables $Variables
-        } else {
-            Get-UrlBaseName -Url $src
-        }
-        $verify = $null
-        if (Test-Property -Value $action -Name "verify") {
-            $verifyValues = [ordered]@{}
-            if (Test-Property -Value $action.verify -Name "sha256") {
-                $verifyValues["sha256"] = Resolve-Sha256Spec -Spec $action.verify.sha256 -Variables $Variables
-            }
-            $verify = [pscustomobject]$verifyValues
-        }
-        $download = Get-Download -Src $src -File $file -Verify $verify
-        $downloads += $download
-
-        $extract = Join-Path $Script:ScratchRoot "main-$hash"
-        Expand-ArchiveWithTar -Archive $download.path -Destination $extract
-        if (Test-Path -LiteralPath (Join-Path $extract "config.spmw.json")) {
-            Copy-DirectoryContents -Source $extract -Destination $tmp
-        } else {
-            $dirs = @(Get-ChildItem -LiteralPath $extract -Directory -Force)
-            if ($dirs.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $dirs[0].FullName "config.spmw.json"))) {
-                Copy-DirectoryContents -Source $dirs[0].FullName -Destination $tmp
-            } else {
-                throw "main package does not contain config.spmw.json at root or under a single top-level directory"
-            }
-        }
-    }
-
-    $metadata = [ordered]@{
-        schema = 1
-        name = "main"
-        variables = $Variables
-        downloads = @($downloads | ForEach-Object {
-            [ordered]@{ src = $_.src; file = $_.file; object = $_.object; sha256 = $_.sha256; verify = $_.verify }
-        })
-        resources = @()
-        fonts = @()
-    }
-    Commit-PackageDirectory -TempPath $tmp -FinalPath $final -Metadata $metadata
-    return [pscustomobject]@{ object = $object; path = $final; hash = $hash }
+    $base = Resolve-ObjectPath "object:$($Variables["path"])"
+    $rpath = Get-ConfigRPath -Variables $Variables
+    return Join-PathParts -Root $base -Relative $rpath
 }
 
 function Invoke-Update {
     Initialize-Workspace
 
-    if (-not [string]::IsNullOrWhiteSpace($Bootstrap)) {
-        $localConfigPath = $Bootstrap
-    } else {
-        $localConfigPath = Get-NextPlanMainConfigPath
-    }
-    $localConfig = Get-LocalConfig -Path $localConfigPath
-    $mainPackage = Normalize-Package -Package $localConfig.packages.main
-    $mainVariables = Resolve-Variables -PackageName "main" -Package $mainPackage
-    $main = Install-MainPackage -Package $mainPackage -Variables $mainVariables
-    $configPath = Join-Path $main.path "config.spmw.json"
-    if (-not (Test-Path -LiteralPath $configPath)) {
-        throw "Missing main config: $configPath"
-    }
-
-    $remoteConfig = Get-Json -Path $configPath
-    $config = if ([string]::IsNullOrWhiteSpace($Bootstrap)) {
-        Merge-Config -Remote $remoteConfig -Local $localConfig
-    } else {
-        $localConfig
-    }
-    if (-not (Test-Property -Value $config -Name "packages")) {
-        throw "merged config is missing packages"
-    }
-
     $packages = [ordered]@{}
-    foreach ($packageProperty in Get-PackagePropertiesInOrder -Packages $config.packages) {
+    $fragments = @()
+    $sourcesFile = Get-SourcesFile
+    $sources = Get-SourceDefinitions -SourcesFile $sourcesFile
+
+    foreach ($sourceName in @($sources.order)) {
+        $definition = Normalize-Package -Package $sources.definitions[$sourceName]
+        $variables = Resolve-Variables -PackageName $sourceName -Package $definition
+        $result = Install-RegularPackage -Name $sourceName -Definition $definition -Variables $variables
+        $packages[$sourceName] = [ordered]@{
+            variables = $variables
+        }
+
+        $configPath = Get-SourceConfigPath -Variables $variables
+        if (-not (Test-Path -LiteralPath $configPath)) {
+            throw "Missing source config for $sourceName`: $configPath"
+        }
+        $fragments += Get-Json -Path $configPath
+    }
+
+    $config = Merge-ConfigFragments -Fragments $fragments
+    foreach ($packageProperty in @($config.packages.PSObject.Properties | Sort-Object Name)) {
+        Assert-PackageKey -Name $packageProperty.Name
         $definition = Normalize-Package -Package $packageProperty.Value
         $variables = Resolve-Variables -PackageName $packageProperty.Name -Package $definition
         $packages[$packageProperty.Name] = [ordered]@{
@@ -1219,7 +1266,8 @@ function Invoke-Update {
     }
 
     $nextPlan = [ordered]@{
-        schema = 1
+        schema = 2
+        sources = @($sources.order)
         packages = $packages
     }
 
@@ -1310,20 +1358,6 @@ function Install-RegularPackage {
                     $resources += @($result.resources)
                     $fonts += @($result.fonts)
                 }
-                "InstallMainConfig" {
-                    $extract = Join-Path $Script:ScratchRoot "$Name-$hash"
-                    Expand-ArchiveWithTar -Archive $download.path -Destination $extract
-                    if (Test-Path -LiteralPath (Join-Path $extract "config.spmw.json")) {
-                        Copy-DirectoryContents -Source $extract -Destination $tmp
-                    } else {
-                        $dirs = @(Get-ChildItem -LiteralPath $extract -Directory -Force)
-                        if ($dirs.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $dirs[0].FullName "config.spmw.json"))) {
-                            Copy-DirectoryContents -Source $dirs[0].FullName -Destination $tmp
-                        } else {
-                            throw "main package does not contain config.spmw.json at root or under a single top-level directory"
-                        }
-                    }
-                }
                 default {
                     throw "Unsupported install action: $($action.action)"
                 }
@@ -1352,20 +1386,66 @@ function Invoke-Install {
     }
 
     $input = Get-Json -Path $Script:NextPlanPath
-    $configPath = Get-NextPlanMainConfigPath
-    $config = Get-LocalConfig -Path $configPath
+    if (-not (Test-Property -Value $input -Name "schema") -or [int]$input.schema -ne 2) {
+        throw "Unsupported next plan schema: $($input.schema)"
+    }
+    if (-not (Test-Property -Value $input -Name "sources")) {
+        throw "next plan is missing sources"
+    }
+    if (-not (Test-Property -Value $input -Name "packages")) {
+        throw "next plan is missing packages"
+    }
+
+    $sourceKeys = @{}
+    $fragments = @()
     $packageObjects = [ordered]@{}
     $planPackages = [ordered]@{}
     $resources = @()
+    foreach ($sourceName in @($input.sources)) {
+        $sourceKey = [string]$sourceName
+        Assert-SourceKey -Name $sourceKey
+        if ($sourceKeys.ContainsKey($sourceKey)) {
+            throw "next plan contains duplicate source: $sourceKey"
+        }
+        $sourceKeys[$sourceKey] = $true
+        if (-not (Test-Property -Value $input.packages -Name $sourceKey)) {
+            throw "next plan source is missing from packages: $sourceKey"
+        }
+        $sourceEntry = Get-MapValue -Map $input.packages -Key $sourceKey
+        if (-not (Test-Property -Value $sourceEntry -Name "variables")) {
+            throw "next plan source is missing variables: $sourceKey"
+        }
+        $sourceVariables = ConvertTo-Hashtable -Value $sourceEntry.variables
+        $sourcePath = Resolve-ObjectPath "object:$($sourceVariables["path"])"
+        if (-not (Test-Path -LiteralPath (Join-Path $sourcePath ".READY"))) {
+            throw "source package is not ready: $sourceKey"
+        }
+        $sourceObject = "object:$($sourceVariables["path"])"
+        $packageObjects[$sourceKey] = $sourceObject
+        $planPackages[$sourceKey] = [ordered]@{
+            object = $sourceObject
+            variables = $sourceVariables
+        }
+        $configPath = Get-SourceConfigPath -Variables $sourceVariables
+        if (-not (Test-Path -LiteralPath $configPath)) {
+            throw "Missing source config for $sourceKey`: $configPath"
+        }
+        $fragments += Get-Json -Path $configPath
+    }
+    $config = Merge-ConfigFragments -Fragments $fragments
 
-    foreach ($packageProperty in Get-PackagePropertiesInOrder -Packages $input.packages) {
+    foreach ($packageProperty in @($input.packages.PSObject.Properties | Sort-Object Name)) {
         $name = $packageProperty.Name
+        Assert-PackageKey -Name $name -AllowSource
+        if ($sourceKeys.ContainsKey($name)) {
+            continue
+        }
         $entry = $packageProperty.Value
         if (-not (Test-Property -Value $config.packages -Name $name)) {
             throw "next plan package is missing from config: $name"
         }
 
-        $definition = Normalize-Package -Package $config.packages.$name
+        $definition = Normalize-Package -Package (Get-MapValue -Map $config.packages -Key $name)
         $variables = ConvertTo-Hashtable -Value $entry.variables
         $result = Install-RegularPackage -Name $name -Definition $definition -Variables $variables
         $packageObjects[$name] = $result.object
@@ -1380,6 +1460,7 @@ function Invoke-Install {
     $links = @()
     foreach ($link in @($inputLinks.PSObject.Properties | Sort-Object Name)) {
         if (-not (Test-PackageTargetAvailable -Spec ([string]$link.Value) -PackageObjects $packageObjects)) {
+            Write-Warning "Skipping link $($link.Name): target package is not in next plan"
             continue
         }
 
@@ -1395,10 +1476,12 @@ function Invoke-Install {
         foreach ($shortcut in @($config.shortcuts.PSObject.Properties | Sort-Object Name)) {
             $shortcutValue = $shortcut.Value
             if (-not (Test-PackageTargetAvailable -Spec ([string]$shortcutValue.program) -PackageObjects $packageObjects)) {
+                Write-Warning "Skipping shortcut $($shortcut.Name): program package is not in next plan"
                 continue
             }
             if ((Test-Property -Value $shortcutValue -Name "cwd") -and
                 -not (Test-PackageTargetAvailable -Spec ([string]$shortcutValue.cwd) -PackageObjects $packageObjects)) {
+                Write-Warning "Skipping shortcut $($shortcut.Name): cwd package is not in next plan"
                 continue
             }
 
@@ -1415,7 +1498,7 @@ function Invoke-Install {
     }
 
     $planBody = [ordered]@{
-        schema = 1
+        schema = 2
         plan = [ordered]@{
             packages = $planPackages
         }
@@ -1427,7 +1510,7 @@ function Invoke-Install {
     }
     $id = (Get-TextSha256 -Text (ConvertTo-StableJson $planBody)).Substring(0, 16)
     $planObject = [ordered]@{
-        schema = 1
+        schema = 2
         id = $id
         plan = $planBody.plan
         resources = $planBody.resources
@@ -1517,9 +1600,7 @@ function Invoke-Prune {
             continue
         }
         $spec = "object:pkgs/$($pkgDir.Name)"
-        if ($pkgDir.Name.StartsWith("main.") -and -not $reachablePkgs.ContainsKey($spec)) {
-            Remove-Item -LiteralPath $pkgDir.FullName -Recurse -Force
-        } elseif ($Pkgs -and -not $reachablePkgs.ContainsKey($spec)) {
+        if ($Pkgs -and -not $reachablePkgs.ContainsKey($spec)) {
             Remove-Item -LiteralPath $pkgDir.FullName -Recurse -Force
         }
     }
@@ -1563,6 +1644,130 @@ function Invoke-Prune {
     Write-Host "prune complete"
 }
 
+function New-ReleaseSourceDefinition {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [Parameter(Mandatory)][string]$FilePrefix,
+        [Parameter(Mandatory)][string]$Version
+    )
+
+    $baseUrl = $BaseUrl.TrimEnd("/")
+    return [ordered]@{
+        name = "source.$Name"
+        defs = @(
+            [ordered]@{
+                version = [ordered]@{
+                    src = "$baseUrl/$Version/VERSION.txt"
+                }
+            }
+        )
+        install = @(
+            [ordered]@{
+                action = "Unpack"
+                file = "$FilePrefix-<version>.tar.gz"
+                src = "$baseUrl/<version>/spmw.tar.gz"
+                verify = [ordered]@{
+                    sha256 = [ordered]@{
+                        src = "$baseUrl/<version>/spmw.tar.gz.sha256"
+                    }
+                }
+            }
+        )
+    }
+}
+
+function New-SourceDefinition {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Spec
+    )
+
+    if (-not (Test-SourceName -Name $Name)) {
+        throw "Invalid source name: $Name"
+    }
+    if ($Spec -match "^(https?://.+)/([^/]+)$") {
+        return New-ReleaseSourceDefinition -Name $Name -BaseUrl $Matches[1] -FilePrefix "spmw" -Version $Matches[2]
+    }
+    if ($Spec -notmatch "^gh-src:([^/]+)/([^/]+)/([^/]+)$") {
+        throw "Unsupported source spec: $Spec"
+    }
+
+    $owner = $Matches[1]
+    $repo = $Matches[2]
+    $branch = $Matches[3]
+    $sourceName = "source.$Name"
+    return [ordered]@{
+        name = $sourceName
+        defs = @(
+            [ordered]@{
+                commit = [ordered]@{
+                    src = "https://github.com/$owner/$repo/commits/$branch.atom"
+                    ty = "CommitFromGithubAtom"
+                }
+            }
+        )
+        install = @(
+            [ordered]@{
+                action = "Unpack"
+                file = "$repo-<commit>.tar.gz"
+                src = "https://github.com/$owner/$repo/archive/<commit>.tar.gz"
+                strip = 1
+            }
+        )
+    }
+}
+
+function Invoke-SourceAdd {
+    Initialize-Workspace
+
+    if ([string]::IsNullOrWhiteSpace($SourceName) -or [string]::IsNullOrWhiteSpace($SourceSpec)) {
+        throw "usage: spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<BASE>/<VERSION>"
+    }
+
+    $newSource = New-SourceDefinition -Name $SourceName -Spec $SourceSpec
+    $sourceKey = [string]$newSource.name
+    $sources = @()
+    if (Test-Path -LiteralPath $Script:SourcesPath) {
+        $existing = Get-Json -Path $Script:SourcesPath
+        if (Test-Property -Value $existing -Name "sources") {
+            $sources = @($existing.sources)
+        }
+    }
+
+    $replaced = $false
+    $updated = @()
+    foreach ($source in @($sources)) {
+        if ((Test-Property -Value $source -Name "name") -and [string]$source.name -eq $sourceKey) {
+            $updated += [pscustomobject]$newSource
+            $replaced = $true
+        } else {
+            $updated += $source
+        }
+    }
+    if (-not $replaced) {
+        $updated += [pscustomobject]$newSource
+    }
+
+    $sourcesFile = [ordered]@{
+        schema = 1
+        sources = @($updated)
+    }
+    Save-JsonAtomic -Value $sourcesFile -Path $Script:SourcesPath
+    if ($replaced) {
+        Write-Host "updated $sourceKey in $Script:SourcesPath"
+    } else {
+        Write-Host "added $sourceKey to $Script:SourcesPath"
+    }
+}
+
+function Invoke-Source {
+    switch ($SourceCommand) {
+        "add" { Invoke-SourceAdd }
+        default { throw "usage: spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<BASE>/<VERSION>" }
+    }
+}
+
 if ($Help -or [string]::IsNullOrWhiteSpace($Command)) {
     Show-Help
     exit 0
@@ -1572,4 +1777,5 @@ switch ($Command) {
     "update" { Invoke-Update }
     "install" { Invoke-Install }
     "prune" { Invoke-Prune }
+    "source" { Invoke-Source }
 }

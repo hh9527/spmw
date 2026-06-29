@@ -27,3 +27,4 @@ jobs:
             dist/spmw.tar.gz
             dist/spmw.tar.gz.sha256
             dist/VERSION.txt
+            dist/bootstrap.ps1

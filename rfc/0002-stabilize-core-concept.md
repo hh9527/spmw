@@ -120,7 +120,7 @@ source object 中：
       "defs": [
         {
           "version": {
-            "src": "https://github.com/hh9527/spmw/releases/latest/download/VERSION.txt"
+            "src": "https://github.com/hh9527/spmw/releases/download/latest/VERSION.txt"
           }
         },
         {
@@ -130,9 +130,8 @@ source object 中：
       "install": [
         {
           "action": "Unpack",
-          "file": "spmw-source-<version>.tar.gz",
-          "src": "https://example.invalid/spmw-source-<version>.tar.gz",
-          "strip": 1
+          "file": "spmw-<version>.tar.gz",
+          "src": "https://example.invalid/spmw-<version>.tar.gz"
         }
       ]
     },
@@ -141,7 +140,7 @@ source object 中：
       "defs": [
         {
           "commit": {
-            "src": "https://github.com/OWNER/REPO/commits/main.atom",
+            "src": "https://github.com/OWNER/REPO/commits/<BRANCH>.atom",
             "ty": "CommitFromGithubAtom"
           }
         }
@@ -160,12 +159,14 @@ source object 中：
 ```
 
 source package 可以复用普通 package object 机制，但它不是普通用户 package。
-source package 的职责是提供一个 source config。它不应作为 link、shortcut
-等 activation target。source package 不需要特殊的 `InstallMainConfig` action。
+source package 的职责是提供一个 source config。source package 不能执行普通
+package action，但它物化出的 package object 可以作为 link、shortcut 等
+activation target。source package 不需要特殊的 `InstallMainConfig` action。
 
 source package 只允许纯获取类 install action。RFC 0002 中唯一支持的 source
-install action 是 `Unpack`。source package install 不能产生 activation
-resources，例如 fonts、registry、links 或 shortcuts。
+install action 是 `Unpack`。source package 的 install action 不能直接产生
+activation resources，例如 fonts 或 registry；links 和 shortcuts 由合并后的
+source config 在 activate 阶段统一生成。
 
 source package 可以通过 `defs` 导出 `config-rpath` 变量。若 source-ref 的
 resolved variables 中没有 `config-rpath`，读取 source config 时使用默认
@@ -491,9 +492,11 @@ spmw 自举闭环：
 ```text
 bootstrap.ps1
   -> 下载临时 spmw CLI
-  -> 写入只包含 source.spmw 的 ~/sources.spmw.json
+  -> 临时 CLI source add spmw https://github.com/hh9527/spmw/releases/download/latest
   -> 临时 CLI update
   -> 临时 CLI install
+  -> 正式 CLI update
+  -> 正式 CLI install
   -> 正式 bin:spmw-cli.ps1 接管
 ```
 
@@ -508,16 +511,20 @@ bootstrap.ps1
       "defs": [
         {
           "version": {
-            "src": "https://github.com/hh9527/spmw/releases/latest/download/VERSION.txt"
+            "src": "https://github.com/hh9527/spmw/releases/download/latest/VERSION.txt"
           }
         }
       ],
       "install": [
         {
           "action": "Unpack",
-          "file": "spmw-source-<version>.tar.gz",
-          "src": "https://github.com/hh9527/spmw/releases/download/<version>/spmw-source.tar.gz",
-          "strip": 1
+          "file": "spmw-<version>.tar.gz",
+          "src": "https://github.com/hh9527/spmw/releases/download/<version>/spmw.tar.gz",
+          "verify": {
+            "sha256": {
+              "src": "https://github.com/hh9527/spmw/releases/download/<version>/spmw.tar.gz.sha256"
+            }
+          }
         }
       ]
     }
@@ -525,29 +532,39 @@ bootstrap.ps1
 }
 ```
 
-`source.spmw` 提供最小自管理 profile，至少声明 `spmw` package 和正式 CLI link。
-bootstrap 只需要保证正式 `spmw-cli.ps1` 由 spmw 自己管理并挂载到 `bin:`。
+`source.spmw` 提供最小自管理 profile，至少声明正式 CLI link。该 link 可以
+直接指向 source package object 中的 CLI，例如
+`pkgs.source.spmw:bin/spmw-cli.ps1`。bootstrap 只需要保证正式 `spmw-cli.ps1`
+由 spmw 自己挂载到 `bin:`。
 
 bootstrap script 应满足：
 
 - 可以在没有既有 `~/sources.spmw.json` 的机器上运行。
-- 只写入或更新自举必需的 `source.spmw`。
+- 通过 CLI 的
+  `source add spmw https://github.com/hh9527/spmw/releases/download/latest`
+  只写入或更新自举必需的 `source.spmw`。
 - 不要求用户配置仓存在。
 - 不读取、不解析、不过滤用户配置仓。
-- 自举完成后，后续更新必须通过正式 `bin:spmw-cli.ps1` 执行标准
-  `update` / `install` 流程。
+- 自举完成前，bootstrap script 必须用正式 `bin:spmw-cli.ps1` 再执行一次
+  标准 `update` / `install` 流程。
 
 用户配置源不是 bootstrap 的一部分。bootstrap 完成后，用户可以通过后续命令
 或直接编辑本地 `~/sources.spmw.json` 添加自己的 source-ref，例如：
 
 ```text
-spmw-cli.ps1 source add main gh:OWNER/REPO
+spmw-cli.ps1 source add main gh-src:OWNER/REPO/main
 ```
 
-最小 `source add` 命令只支持 GitHub repo 简写：
+最小 `source add` 命令支持 GitHub source archive：
 
 ```text
-spmw source add <name> gh:<OWNER>/<REPO>
+spmw source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>
+```
+
+以及通用 HTTP release source：
+
+```text
+spmw source add <name> http(s)://<BASE>/<VERSION>
 ```
 
 其中 `<name>` 是不带 `source.` 前缀的本地 source 名。命令写入
@@ -567,7 +584,7 @@ GitHub source 的默认定义为：
   "defs": [
     {
       "commit": {
-        "src": "https://github.com/<OWNER>/<REPO>/commits/main.atom",
+        "src": "https://github.com/<OWNER>/<REPO>/commits/<BRANCH>.atom",
         "ty": "CommitFromGithubAtom"
       }
     }
@@ -582,6 +599,37 @@ GitHub source 的默认定义为：
   ]
 }
 ```
+
+release source 的默认定义为：
+
+```json
+{
+  "name": "source.<name>",
+  "defs": [
+    {
+      "version": {
+        "src": "<BASE>/<VERSION>/VERSION.txt"
+      }
+    }
+  ],
+  "install": [
+    {
+      "action": "Unpack",
+      "file": "spmw-<version>.tar.gz",
+      "src": "<BASE>/<version>/spmw.tar.gz",
+      "verify": {
+        "sha256": {
+          "src": "<BASE>/<version>/spmw.tar.gz.sha256"
+        }
+      }
+    }
+  ]
+}
+```
+
+其中 `http(s)://<BASE>/<VERSION>` 形式中，最后一个 path segment 是 `<VERSION>`，
+前面的 URL 是 release `<BASE>`。这允许同一个本地或私有 HTTP server 同时
+伺服多个 release 根。
 
 加入后，本地 source 顺序可以变成：
 
