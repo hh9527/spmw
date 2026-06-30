@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "links": {
-    "bin:spmw-cli.ps1": "pkgs.source:bin/spmw-cli.ps1"
+  "bins": {
+    "spmw-cli": "pkgs.source:bin/spmw-cli.ps1"
   }
 }

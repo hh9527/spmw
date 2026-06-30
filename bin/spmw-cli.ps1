@@ -34,7 +34,7 @@ $Script:LockPath = Join-Path $Script:StateRoot "lock.json"
 $Script:Roots = @{
     user = $env:USERPROFILE
     apps = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\SPMW"
-    bin = Join-Path $env:USERPROFILE ".local\bin"
+    bin = Join-Path $env:USERPROFILE ".spmw\bin"
 }
 
 function Ensure-Command {
@@ -47,11 +47,11 @@ function Ensure-Command {
 
 function Show-Help {
     Write-Host @"
-spmw-cli.ps1 update
-spmw-cli.ps1 install [-Prepare]
-spmw-cli.ps1 prune [-Pkgs] [-Fonts] [-Cache]
-spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<CHANNEL.txt>[#<config-rpath>]
-spmw-cli.ps1 -Help
+spmw-cli update
+spmw-cli install [-Prepare]
+spmw-cli prune [-Pkgs] [-Fonts] [-Cache]
+spmw-cli source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<CHANNEL.txt>[#<config-rpath>]
+spmw-cli -Help
 
 Commands:
   update   Resolve config and variables, then write next-plan.json.
@@ -571,6 +571,8 @@ function Get-Download {
             throw "sha256 mismatch for $Src`: expected $verifySha256, got $actualSha256"
         }
     }
+    $downloadItem = Get-Item -LiteralPath $path -Force
+    $downloadItem.Attributes = $downloadItem.Attributes -bor [System.IO.FileAttributes]::ReadOnly
 
     return [pscustomobject]@{
         src = $Src
@@ -713,9 +715,11 @@ function Commit-PackageDirectory {
     Ensure-Directory $spmwDir
     Save-JsonAtomic -Value $Metadata -Path (Join-Path $spmwDir "metadata.json")
     Set-Content -Path (Join-Path $TempPath ".READY") -Value ""
+    Protect-ObjectTree -Path $TempPath
 
     Ensure-Directory (Split-Path -Parent $FinalPath)
     if (Test-Path -LiteralPath $FinalPath) {
+        Unprotect-ObjectTree -Path $TempPath
         Remove-Item -LiteralPath $TempPath -Recurse -Force
         return
     }
@@ -739,6 +743,34 @@ function New-HardLinkOrCopy {
     } catch {
         Copy-Item -LiteralPath $Target -Destination $Path -Force
     }
+}
+
+function Protect-ObjectTree {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+        $item.Attributes = $item.Attributes -bor [System.IO.FileAttributes]::ReadOnly
+    }
+    $root = Get-Item -LiteralPath $Path -Force
+    $root.Attributes = $root.Attributes -bor [System.IO.FileAttributes]::ReadOnly
+}
+
+function Unprotect-ObjectTree {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+        $item.Attributes = $item.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+    }
+    $root = Get-Item -LiteralPath $Path -Force
+    $root.Attributes = $root.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
 }
 
 function Install-FontsFromArchive {
@@ -772,6 +804,8 @@ function Install-FontsFromArchive {
         $fontFile = "$($font.BaseName).$fontHash$($font.Extension)"
         $fontPath = Join-Path $Script:FontRoot $fontFile
         New-HardLinkOrCopy -Path $fontPath -Target $font.FullName
+        $fontItem = Get-Item -LiteralPath $fontPath -Force
+        $fontItem.Attributes = $fontItem.Attributes -bor [System.IO.FileAttributes]::ReadOnly
 
         $fontType = switch ($font.Extension.ToLowerInvariant()) {
             ".otf" { "OpenType" }
@@ -870,40 +904,6 @@ function Test-PackageTargetAvailable {
     return $true
 }
 
-function Set-ManagedLink {
-    param(
-        [Parameter(Mandatory)][string]$Link,
-        [Parameter(Mandatory)][string]$Target
-    )
-
-    Ensure-Directory (Split-Path -Parent $Link)
-    $existing = Get-Item -LiteralPath $Link -Force -ErrorAction SilentlyContinue
-    if ($existing) {
-        if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-            Remove-Item -LiteralPath $Link -Recurse -Force
-        } elseif (-not $existing.PSIsContainer) {
-            Remove-Item -LiteralPath $Link -Force
-        } else {
-            throw "Refusing to replace non-link directory: $Link"
-        }
-    }
-
-    $targetItem = Get-Item -LiteralPath $Target -Force
-    if ($targetItem.PSIsContainer) {
-        try {
-            New-Item -ItemType SymbolicLink -Path $Link -Target $Target | Out-Null
-        } catch {
-            New-Item -ItemType Junction -Path $Link -Target $Target | Out-Null
-        }
-    } else {
-        try {
-            New-Item -ItemType SymbolicLink -Path $Link -Target $Target | Out-Null
-        } catch {
-            New-HardLinkOrCopy -Path $Link -Target $Target
-        }
-    }
-}
-
 function Set-ManagedShortcut {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -923,6 +923,102 @@ function Set-ManagedShortcut {
         $shortcut.WorkingDirectory = $Cwd
     }
     $shortcut.Save()
+}
+
+function Remove-ReparsePoint {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) {
+        return
+    }
+    if (-not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing to remove non-reparse point as link: $Path"
+    }
+
+    if ($item.PSIsContainer) {
+        [System.IO.Directory]::Delete($item.FullName, $false)
+    } else {
+        [System.IO.File]::Delete($item.FullName)
+    }
+}
+
+function ConvertTo-CmdQuoted {
+    param([Parameter(Mandatory)][string]$Text)
+
+    return '"' + ($Text -replace '"', '""') + '"'
+}
+
+function Set-ManagedBin {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Program
+    )
+
+    if (-not $Path.EndsWith(".cmd", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $Path = "$Path.cmd"
+    }
+
+    Ensure-Directory (Split-Path -Parent $Path)
+    $quotedProgram = ConvertTo-CmdQuoted -Text $Program
+    $extension = [System.IO.Path]::GetExtension($Program).ToLowerInvariant()
+    $command = if ($extension -eq ".ps1") {
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $quotedProgram %*"
+    } else {
+        "$quotedProgram %*"
+    }
+    Set-Content -Encoding ASCII -Path $Path -Value @(
+        "@echo off"
+        $command
+    )
+}
+
+function Set-ManagedSyncFile {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Source
+    )
+
+    Ensure-Directory (Split-Path -Parent $Path)
+    $existing = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($existing) {
+        if ($existing.PSIsContainer -and -not ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw "Refusing to replace directory with sync file: $Path"
+        }
+        if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            Remove-ReparsePoint -Path $Path
+        } else {
+            Remove-Item -LiteralPath $Path -Force
+        }
+    }
+
+    try {
+        New-Item -ItemType SymbolicLink -Path $Path -Target $Source | Out-Null
+    } catch {
+        Copy-Item -LiteralPath $Source -Destination $Path -Force
+    }
+}
+
+function Set-ManagedSyncDirectory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Source
+    )
+
+    Ensure-Directory (Split-Path -Parent $Path)
+    $existing = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($existing) {
+        if (-not ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw "Refusing to replace non-link directory with sync directory: $Path"
+        }
+        Remove-ReparsePoint -Path $Path
+    }
+
+    try {
+        New-Item -ItemType SymbolicLink -Path $Path -Target $Source | Out-Null
+    } catch {
+        New-Item -ItemType Junction -Path $Path -Target $Source | Out-Null
+    }
 }
 
 function Convert-RegistryPath {
@@ -1010,14 +1106,28 @@ function Apply-Resources {
     $fontChanged = $false
     foreach ($resource in @($Resources)) {
         switch ([string]$resource.kind) {
-            "link" {
+            "bin" {
                 $key = [string]$resource.key
-                if (-not $key.StartsWith("link:")) {
-                    throw "Invalid link key: $key"
+                if (-not $key.StartsWith("bin:")) {
+                    throw "Invalid bin key: $key"
                 }
-                $link = Resolve-VRootPath -Spec ($key.Substring(5))
-                $target = Resolve-ActivationPath ([string]$resource.target)
-                Set-ManagedLink -Link $link -Target $target
+                $path = Resolve-VRootPath -Spec ([string]$resource.path)
+                $program = Resolve-ActivationPath ([string]$resource.program)
+                Set-ManagedBin -Path $path -Program $program
+            }
+            "app" {
+                $key = [string]$resource.key
+                if (-not $key.StartsWith("app:")) {
+                    throw "Invalid app key: $key"
+                }
+                $path = Resolve-VRootPath -Spec ([string]$resource.path)
+                $program = Resolve-ActivationPath ([string]$resource.program)
+                $cwd = if (Test-Property -Value $resource -Name "cwd") {
+                    Resolve-ActivationPath ([string]$resource.cwd)
+                } else {
+                    $null
+                }
+                Set-ManagedShortcut -Path $path -Program $program -Cwd $cwd
             }
             "reg" {
                 Set-ManagedRegistryValue -Key ([string]$resource.key) -Type ([string]$resource.type) -Data ([string]$resource.data)
@@ -1039,6 +1149,24 @@ function Apply-Resources {
                 }
                 Set-ManagedShortcut -Path $path -Program $program -Cwd $cwd
             }
+            "sync-file" {
+                $key = [string]$resource.key
+                if (-not $key.StartsWith("sync:")) {
+                    throw "Invalid sync key: $key"
+                }
+                $target = Resolve-VRootPath -Spec ([string]$resource.target)
+                $source = Resolve-ActivationPath ([string]$resource.source)
+                Set-ManagedSyncFile -Path $target -Source $source
+            }
+            "sync-dir" {
+                $key = [string]$resource.key
+                if (-not $key.StartsWith("sync:")) {
+                    throw "Invalid sync key: $key"
+                }
+                $target = Resolve-VRootPath -Spec ([string]$resource.target)
+                $source = Resolve-ActivationPath ([string]$resource.source)
+                Set-ManagedSyncDirectory -Path $target -Source $source
+            }
             default {
                 throw "Unsupported resource kind: $($resource.kind)"
             }
@@ -1055,10 +1183,39 @@ function Remove-Resources {
 
     $fontChanged = $false
     foreach ($key in @($Keys)) {
-        if ([string]$key -like "link:*") {
-            $path = Resolve-VRootPath -Spec (([string]$key).Substring(5))
+        if ([string]$key -like "bin:*") {
+            $path = Resolve-VRootPath -Spec "bin:$(([string]$key).Substring("bin:".Length)).cmd"
             if (Test-Path -LiteralPath $path) {
-                Remove-Item -LiteralPath $path -Recurse -Force
+                Remove-Item -LiteralPath $path -Force
+            }
+        } elseif ([string]$key -like "app:*") {
+            $path = Resolve-VRootPath -Spec "apps:$(([string]$key).Substring("app:".Length)).lnk"
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Force
+            }
+        } elseif ([string]$key -like "sync:*") {
+            $path = Resolve-VRootPath -Spec (([string]$key).Substring("sync:".Length))
+            if (Test-Path -LiteralPath $path) {
+                $item = Get-Item -LiteralPath $path -Force
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    Remove-ReparsePoint -Path $path
+                } elseif ($item.PSIsContainer) {
+                    throw "Refusing to recursively remove non-link sync directory: $path"
+                } else {
+                    Remove-Item -LiteralPath $path -Force
+                }
+            }
+        } elseif ([string]$key -like "link:*") {
+            $path = Resolve-VRootPath -Spec (([string]$key).Substring("link:".Length))
+            if (Test-Path -LiteralPath $path) {
+                $item = Get-Item -LiteralPath $path -Force
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    Remove-ReparsePoint -Path $path
+                } elseif ($item.PSIsContainer) {
+                    throw "Refusing to recursively remove deprecated link directory: $path"
+                } else {
+                    Remove-Item -LiteralPath $path -Force
+                }
             }
         } elseif ([string]$key -like "reg:*") {
             Remove-ManagedRegistryValue -Key ([string]$key)
@@ -1093,8 +1250,20 @@ function Get-ResourceKeys {
     param([Parameter(Mandatory)]$PlanObject)
 
     $keys = @()
-    foreach ($link in @($PlanObject.resources.links)) {
-        $keys += [string]$link.key
+    if (Test-Property -Value $PlanObject.resources -Name "bins") {
+        foreach ($bin in @($PlanObject.resources.bins)) {
+            $keys += [string]$bin.key
+        }
+    }
+    if (Test-Property -Value $PlanObject.resources -Name "apps") {
+        foreach ($app in @($PlanObject.resources.apps)) {
+            $keys += [string]$app.key
+        }
+    }
+    if (Test-Property -Value $PlanObject.resources -Name "syncs") {
+        foreach ($sync in @($PlanObject.resources.syncs)) {
+            $keys += [string]$sync.key
+        }
     }
     if (Test-Property -Value $PlanObject.resources -Name "shortcuts") {
         foreach ($shortcut in @($PlanObject.resources.shortcuts)) {
@@ -1125,6 +1294,9 @@ function Merge-ConfigFragments {
     param([Parameter(Mandatory)]$Fragments)
 
     $packages = [ordered]@{}
+    $bins = [ordered]@{}
+    $apps = [ordered]@{}
+    $sync = [ordered]@{}
     $links = [ordered]@{}
     $shortcuts = [ordered]@{}
 
@@ -1136,6 +1308,21 @@ function Merge-ConfigFragments {
             foreach ($property in @($fragment.packages.PSObject.Properties | Sort-Object Name)) {
                 Assert-PackageKey -Name $property.Name
                 $packages[$property.Name] = $property.Value
+            }
+        }
+        if (Test-Property -Value $fragment -Name "bins") {
+            foreach ($property in @($fragment.bins.PSObject.Properties | Sort-Object Name)) {
+                $bins[$property.Name] = $property.Value
+            }
+        }
+        if (Test-Property -Value $fragment -Name "apps") {
+            foreach ($property in @($fragment.apps.PSObject.Properties | Sort-Object Name)) {
+                $apps[$property.Name] = $property.Value
+            }
+        }
+        if (Test-Property -Value $fragment -Name "sync") {
+            foreach ($property in @($fragment.sync.PSObject.Properties | Sort-Object Name)) {
+                $sync[$property.Name] = $property.Value
             }
         }
         if (Test-Property -Value $fragment -Name "links") {
@@ -1153,6 +1340,9 @@ function Merge-ConfigFragments {
     return [pscustomobject]@{
         schema = 2
         packages = [pscustomobject]$packages
+        bins = [pscustomobject]$bins
+        apps = [pscustomobject]$apps
+        sync = [pscustomobject]$sync
         links = [pscustomobject]$links
         shortcuts = [pscustomobject]$shortcuts
     }
@@ -1176,6 +1366,27 @@ function Resolve-SourceLocalConfig {
         [Parameter(Mandatory)][string]$SourceName
     )
 
+    if (Test-Property -Value $Config -Name "bins") {
+        foreach ($property in @($Config.bins.PSObject.Properties)) {
+            $property.Value = Resolve-SourceLocalPackageTarget -Spec ([string]$property.Value) -SourceName $SourceName
+        }
+    }
+    if (Test-Property -Value $Config -Name "apps") {
+        foreach ($property in @($Config.apps.PSObject.Properties)) {
+            $app = $property.Value
+            if (Test-Property -Value $app -Name "program") {
+                $app.program = Resolve-SourceLocalPackageTarget -Spec ([string]$app.program) -SourceName $SourceName
+            }
+            if (Test-Property -Value $app -Name "cwd") {
+                $app.cwd = Resolve-SourceLocalPackageTarget -Spec ([string]$app.cwd) -SourceName $SourceName
+            }
+        }
+    }
+    if (Test-Property -Value $Config -Name "sync") {
+        foreach ($property in @($Config.sync.PSObject.Properties)) {
+            $property.Value = Resolve-SourceLocalPackageTarget -Spec ([string]$property.Value) -SourceName $SourceName
+        }
+    }
     if (Test-Property -Value $Config -Name "links") {
         foreach ($property in @($Config.links.PSObject.Properties)) {
             $property.Value = Resolve-SourceLocalPackageTarget -Spec ([string]$property.Value) -SourceName $SourceName
@@ -1363,6 +1574,7 @@ function Install-RegularPackage {
     $objectSpec = "object:$($Variables["path"])"
     $final = Resolve-ObjectPath $objectSpec
     if ((Test-Path -LiteralPath $final) -and (Test-Path -LiteralPath (Join-Path $final ".READY"))) {
+        Protect-ObjectTree -Path $final
         $metadataPath = Join-Path $final ".spmw\metadata.json"
         $metadataResources = @()
         if (Test-Path -LiteralPath $metadataPath) {
@@ -1501,24 +1713,124 @@ function Invoke-Install {
         $resources += @($result.resources)
     }
 
-    $inputLinks = if (Test-Property -Value $config -Name "links") { $config.links } else { [pscustomobject]@{} }
-    $links = @()
-    foreach ($link in @($inputLinks.PSObject.Properties | Sort-Object Name)) {
-        if (-not (Test-PackageTargetAvailable -Spec ([string]$link.Value) -PackageObjects $packageObjects)) {
-            Write-Warning "Skipping link $($link.Name): target package is not in next plan"
-            continue
-        }
+    $bins = @()
+    if (Test-Property -Value $config -Name "bins") {
+        foreach ($bin in @($config.bins.PSObject.Properties | Sort-Object Name)) {
+            if ($bin.Name -match "[\\/:]" -or [System.IO.Path]::GetExtension($bin.Name)) {
+                throw "Invalid bin command name: $($bin.Name)"
+            }
+            if (-not (Test-PackageTargetAvailable -Spec ([string]$bin.Value) -PackageObjects $packageObjects)) {
+                Write-Warning "Skipping bin $($bin.Name): target package is not in next plan"
+                continue
+            }
 
-        $links += [pscustomobject]@{
-            kind = "link"
-            key = "link:$($link.Name)"
-            target = Convert-PackageTargetToObjectSpec -Spec ([string]$link.Value) -PackageObjects $packageObjects
+            $bins += [pscustomobject]@{
+                kind = "bin"
+                key = "bin:$($bin.Name)"
+                path = "bin:$($bin.Name).cmd"
+                program = Convert-PackageTargetToObjectSpec -Spec ([string]$bin.Value) -PackageObjects $packageObjects
+            }
         }
     }
 
-    $shortcuts = @()
+    $apps = @()
+    if (Test-Property -Value $config -Name "apps") {
+        foreach ($app in @($config.apps.PSObject.Properties | Sort-Object Name)) {
+            $appValue = $app.Value
+            if (-not (Test-Property -Value $appValue -Name "program")) {
+                throw "App $($app.Name) is missing program"
+            }
+            if (-not (Test-PackageTargetAvailable -Spec ([string]$appValue.program) -PackageObjects $packageObjects)) {
+                Write-Warning "Skipping app $($app.Name): program package is not in next plan"
+                continue
+            }
+            if ((Test-Property -Value $appValue -Name "cwd") -and
+                -not (Test-PackageTargetAvailable -Spec ([string]$appValue.cwd) -PackageObjects $packageObjects)) {
+                Write-Warning "Skipping app $($app.Name): cwd package is not in next plan"
+                continue
+            }
+
+            $appResource = [ordered]@{
+                kind = "app"
+                key = "app:$($app.Name)"
+                path = "apps:$($app.Name).lnk"
+                program = Convert-PackageTargetToObjectSpec -Spec ([string]$appValue.program) -PackageObjects $packageObjects
+            }
+            if (Test-Property -Value $appValue -Name "cwd") {
+                $appResource["cwd"] = Convert-PackageTargetToObjectSpec -Spec ([string]$appValue.cwd) -PackageObjects $packageObjects
+            }
+            $apps += [pscustomobject]$appResource
+        }
+    }
+
+    $syncs = @()
+    if (Test-Property -Value $config -Name "sync") {
+        foreach ($sync in @($config.sync.PSObject.Properties | Sort-Object Name)) {
+            $target = [string]$sync.Name
+            $source = [string]$sync.Value
+            if (-not (Test-PackageTargetAvailable -Spec $source -PackageObjects $packageObjects)) {
+                Write-Warning "Skipping sync $target`: source package is not in next plan"
+                continue
+            }
+            $targetIsDir = $target.EndsWith("/")
+            $sourceIsDir = $source.EndsWith("/")
+            if ($targetIsDir -ne $sourceIsDir) {
+                throw "Sync target and source must both use trailing / for directories: $target"
+            }
+            $syncKind = if ($targetIsDir) { "sync-dir" } else { "sync-file" }
+            $syncMethod = if ($targetIsDir) { "symlink-or-junction" } else { "symlink-or-copy" }
+
+            $syncs += [pscustomobject]@{
+                kind = $syncKind
+                key = "sync:$target"
+                target = $target
+                source = Convert-PackageTargetToObjectSpec -Spec $source -PackageObjects $packageObjects
+                method = $syncMethod
+            }
+        }
+    }
+
+    $inputLinks = if (Test-Property -Value $config -Name "links") { $config.links } else { [pscustomobject]@{} }
+    foreach ($link in @($inputLinks.PSObject.Properties | Sort-Object Name)) {
+        Write-Warning "links is deprecated; migrate $($link.Name) to bins or sync"
+        $linkTarget = [string]$link.Value
+        if (-not (Test-PackageTargetAvailable -Spec $linkTarget -PackageObjects $packageObjects)) {
+            Write-Warning "Skipping deprecated link $($link.Name): target package is not in next plan"
+            continue
+        }
+
+        if ($link.Name.StartsWith("bin:")) {
+            $commandName = [System.IO.Path]::GetFileNameWithoutExtension($link.Name.Substring("bin:".Length))
+            if ([string]::IsNullOrWhiteSpace($commandName)) {
+                throw "Invalid deprecated bin link: $($link.Name)"
+            }
+            $bins += [pscustomobject]@{
+                kind = "bin"
+                key = "bin:$commandName"
+                path = "bin:$commandName.cmd"
+                program = Convert-PackageTargetToObjectSpec -Spec $linkTarget -PackageObjects $packageObjects
+            }
+        } else {
+            $targetIsDir = $link.Name.EndsWith("/")
+            $sourceIsDir = $linkTarget.EndsWith("/")
+            if ($targetIsDir -ne $sourceIsDir) {
+                throw "Deprecated link target and source must both use trailing / for directories: $($link.Name)"
+            }
+            $syncKind = if ($targetIsDir) { "sync-dir" } else { "sync-file" }
+            $syncMethod = if ($targetIsDir) { "symlink-or-junction" } else { "symlink-or-copy" }
+            $syncs += [pscustomobject]@{
+                kind = $syncKind
+                key = "sync:$($link.Name)"
+                target = $link.Name
+                source = Convert-PackageTargetToObjectSpec -Spec $linkTarget -PackageObjects $packageObjects
+                method = $syncMethod
+            }
+        }
+    }
+
     if (Test-Property -Value $config -Name "shortcuts") {
         foreach ($shortcut in @($config.shortcuts.PSObject.Properties | Sort-Object Name)) {
+            Write-Warning "shortcuts is deprecated; migrate $($shortcut.Name) to apps"
             $shortcutValue = $shortcut.Value
             if (-not (Test-PackageTargetAvailable -Spec ([string]$shortcutValue.program) -PackageObjects $packageObjects)) {
                 Write-Warning "Skipping shortcut $($shortcut.Name): program package is not in next plan"
@@ -1530,15 +1842,21 @@ function Invoke-Install {
                 continue
             }
 
+            $appName = if ($shortcut.Name.StartsWith("apps:")) {
+                $shortcut.Name.Substring("apps:".Length)
+            } else {
+                $shortcut.Name
+            }
             $shortcutResource = [ordered]@{
-                kind = "shortcut"
-                key = "shortcut:$($shortcut.Name)"
+                kind = "app"
+                key = "app:$appName"
+                path = "apps:$appName.lnk"
                 program = Convert-PackageTargetToObjectSpec -Spec ([string]$shortcutValue.program) -PackageObjects $packageObjects
             }
             if (Test-Property -Value $shortcutValue -Name "cwd") {
                 $shortcutResource["cwd"] = Convert-PackageTargetToObjectSpec -Spec ([string]$shortcutValue.cwd) -PackageObjects $packageObjects
             }
-            $shortcuts += [pscustomobject]$shortcutResource
+            $apps += [pscustomobject]$shortcutResource
         }
     }
 
@@ -1548,8 +1866,10 @@ function Invoke-Install {
             packages = $planPackages
         }
         resources = [ordered]@{
-            links = @($links)
-            shortcuts = @($shortcuts)
+            bins = @($bins)
+            apps = @($apps)
+            syncs = @($syncs)
+            shortcuts = @()
             regs = @($resources | Where-Object { [string]$_.kind -eq "reg" })
         }
     }
@@ -1585,14 +1905,23 @@ function Invoke-ActivatePlan {
     }
 
     $planObject = Get-Json -Path $PlanPath
-    $allResources = @($planObject.resources.links)
+    $allResources = @()
+    if (Test-Property -Value $planObject.resources -Name "bins") {
+        $allResources += @($planObject.resources.bins)
+    }
+    if (Test-Property -Value $planObject.resources -Name "apps") {
+        $allResources += @($planObject.resources.apps)
+    }
+    if (Test-Property -Value $planObject.resources -Name "syncs") {
+        $allResources += @($planObject.resources.syncs)
+    }
     if (Test-Property -Value $planObject.resources -Name "shortcuts") {
         $allResources += @($planObject.resources.shortcuts)
     }
     $allResources += @($planObject.resources.regs)
+    $lock = Get-LockState
     Apply-Resources -Resources $allResources
 
-    $lock = Get-LockState
     $refs = @(@($lock.refs) + (Get-ResourceKeys -PlanObject $planObject) | Sort-Object -Unique)
     $newLock = [ordered]@{
         schema = 1
@@ -1641,11 +1970,13 @@ function Invoke-Prune {
 
     foreach ($pkgDir in @(Get-ChildItem -LiteralPath $Script:PackageRoot -Directory)) {
         if ($pkgDir.Name.StartsWith(".tmp.")) {
+            Unprotect-ObjectTree -Path $pkgDir.FullName
             Remove-Item -LiteralPath $pkgDir.FullName -Recurse -Force
             continue
         }
         $spec = "object:pkgs/$($pkgDir.Name)"
         if ($Pkgs -and -not $reachablePkgs.ContainsKey($spec)) {
+            Unprotect-ObjectTree -Path $pkgDir.FullName
             Remove-Item -LiteralPath $pkgDir.FullName -Recurse -Force
         }
     }
@@ -1671,6 +2002,7 @@ function Invoke-Prune {
             foreach ($fontFile in @(Get-ChildItem -LiteralPath $Script:FontRoot -File)) {
                 $spec = "object:fonts/$($fontFile.Name)"
                 if (-not $reachableFonts.ContainsKey($spec)) {
+                    $fontFile.Attributes = $fontFile.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
                     Remove-Item -LiteralPath $fontFile.FullName -Force
                 }
             }
@@ -1680,6 +2012,7 @@ function Invoke-Prune {
             foreach ($downloadFile in @(Get-ChildItem -LiteralPath $Script:DownloadRoot -File)) {
                 $spec = "object:dl/$($downloadFile.Name)"
                 if (-not $reachableDownloads.ContainsKey($spec)) {
+                    $downloadFile.Attributes = $downloadFile.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
                     Remove-Item -LiteralPath $downloadFile.FullName -Force
                 }
             }
@@ -1795,7 +2128,7 @@ function Invoke-SourceAdd {
     Initialize-Workspace
 
     if ([string]::IsNullOrWhiteSpace($SourceName) -or [string]::IsNullOrWhiteSpace($SourceSpec)) {
-        throw "usage: spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<CHANNEL.txt>[#<config-rpath>]"
+        throw "usage: spmw-cli source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<CHANNEL.txt>[#<config-rpath>]"
     }
 
     $newSource = New-SourceDefinition -Name $SourceName -Spec $SourceSpec
@@ -1837,7 +2170,7 @@ function Invoke-SourceAdd {
 function Invoke-Source {
     switch ($SourceCommand) {
         "add" { Invoke-SourceAdd }
-        default { throw "usage: spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<CHANNEL.txt>[#<config-rpath>]" }
+        default { throw "usage: spmw-cli source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<CHANNEL.txt>[#<config-rpath>]" }
     }
 }
 

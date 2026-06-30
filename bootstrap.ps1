@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 $spmwRoot = Join-Path $env:USERPROFILE ".spmw"
 $bootstrapRoot = Join-Path $spmwRoot "bootstrap"
 $userBinRoot = Join-Path $env:USERPROFILE ".local\bin"
+$spmwBinRoot = Join-Path $spmwRoot "bin"
 
 function Ensure-Directory {
     param([Parameter(Mandatory)][string]$Path)
@@ -52,59 +53,73 @@ function Resolve-UrlReference {
     return $resolved.AbsoluteUri
 }
 
-function Ensure-UserPathEntry {
+function Normalize-PathEntry {
     param([Parameter(Mandatory)][string]$Path)
 
-    Ensure-Directory $Path
-    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd("\")
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $entries = @()
-    if (-not [string]::IsNullOrWhiteSpace($userPath)) {
-        $entries = @($userPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    }
-
-    $exists = $false
-    foreach ($entry in $entries) {
-        try {
-            $entryFullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($entry)).TrimEnd("\")
-        } catch {
-            $entryFullPath = $entry.TrimEnd("\")
-        }
-        if ([string]::Equals($entryFullPath, $fullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $exists = $true
-            break
-        }
-    }
-
-    if (-not $exists) {
-        $newUserPath = if ($entries.Count -gt 0) {
-            (@($entries) + $fullPath) -join ";"
-        } else {
-            $fullPath
-        }
-        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
-    }
-
-    $processEntries = @($env:PATH -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $processExists = $false
-    foreach ($entry in $processEntries) {
-        try {
-            $entryFullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($entry)).TrimEnd("\")
-        } catch {
-            $entryFullPath = $entry.TrimEnd("\")
-        }
-        if ([string]::Equals($entryFullPath, $fullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $processExists = $true
-            break
-        }
-    }
-    if (-not $processExists) {
-        $env:PATH = if ([string]::IsNullOrWhiteSpace($env:PATH)) { $fullPath } else { "$env:PATH;$fullPath" }
+    try {
+        return [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Path)).TrimEnd("\")
+    } catch {
+        return $Path.TrimEnd("\")
     }
 }
 
+function Set-PathOrder {
+    param(
+        [Parameter(Mandatory)][string[]]$Preferred
+    )
+
+    foreach ($path in $Preferred) {
+        Ensure-Directory $path
+    }
+
+    $preferredFull = @($Preferred | ForEach-Object { Normalize-PathEntry -Path $_ })
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $entries = if ([string]::IsNullOrWhiteSpace($userPath)) {
+        @()
+    } else {
+        @($userPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+
+    $kept = @()
+    foreach ($entry in $entries) {
+        $entryFull = Normalize-PathEntry -Path $entry
+        $isPreferred = $false
+        foreach ($path in $preferredFull) {
+            if ([string]::Equals($entryFull, $path, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $isPreferred = $true
+                break
+            }
+        }
+        if (-not $isPreferred) {
+            $kept += $entry
+        }
+    }
+    [Environment]::SetEnvironmentVariable("Path", (@($preferredFull) + $kept) -join ";", "User")
+
+    $processEntries = if ([string]::IsNullOrWhiteSpace($env:PATH)) {
+        @()
+    } else {
+        @($env:PATH -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    $processKept = @()
+    foreach ($entry in $processEntries) {
+        $entryFull = Normalize-PathEntry -Path $entry
+        $isPreferred = $false
+        foreach ($path in $preferredFull) {
+            if ([string]::Equals($entryFull, $path, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $isPreferred = $true
+                break
+            }
+        }
+        if (-not $isPreferred) {
+            $processKept += $entry
+        }
+    }
+    $env:PATH = (@($preferredFull) + $processKept) -join ";"
+}
+
 Ensure-Directory $bootstrapRoot
-Ensure-UserPathEntry -Path $userBinRoot
+Set-PathOrder -Preferred @($userBinRoot, $spmwBinRoot)
 
 $sourceUrl = [string]$env:SPMW_SOURCE_URL
 if ([string]::IsNullOrWhiteSpace($sourceUrl)) {
@@ -168,12 +183,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "spmw install failed"
 }
 
-$cli = Join-Path $userBinRoot "spmw-cli.ps1"
-& powershell.exe -ExecutionPolicy Bypass -File $cli update
+$cli = Join-Path $spmwBinRoot "spmw-cli.cmd"
+& $cli update
 if ($LASTEXITCODE -ne 0) {
     throw "formal spmw update failed"
 }
-& powershell.exe -ExecutionPolicy Bypass -File $cli install
+& $cli install
 if ($LASTEXITCODE -ne 0) {
     throw "formal spmw install failed"
 }
