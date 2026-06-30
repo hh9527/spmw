@@ -26,13 +26,13 @@ fonts、registry 等资源。
 在 PowerShell 中执行：
 
 ```powershell
-irm "https://github.com/hh9527/spmw/releases/latest/download/bootstrap.ps1" | iex
+irm "https://raw.githubusercontent.com/hh9527/spmw/main/bootstrap.ps1" | iex
 ```
 
 如果需要让 bootstrap 入口也走 curl 代理环境变量：
 
 ```powershell
-((curl.exe -fL "https://github.com/hh9527/spmw/releases/latest/download/bootstrap.ps1") -join "`n") | iex
+((curl.exe -fL "https://raw.githubusercontent.com/hh9527/spmw/main/bootstrap.ps1") -join "`n") | iex
 ```
 
 bootstrap 会安装最小 `source.spmw`，并把 `spmw-cli.ps1` 挂载到
@@ -66,10 +66,17 @@ spmw-cli.ps1 update
 spmw-cli.ps1 install
 ```
 
-也可以加入一个 HTTP release source：
+也可以加入一个 HTTP channel source。channel 文件内容是 tarball URL，可以是
+相对 URL：
 
 ```powershell
-spmw-cli.ps1 source add tools https://example.com/spmw/tools/latest
+spmw-cli.ps1 source add tools https://example.com/spmw/channels/latest.txt
+```
+
+如果 `config.spmw.json` 不在 tarball 根目录，可以用 URL fragment 指定：
+
+```powershell
+spmw-cli.ps1 source add tools https://example.com/spmw/channels/latest.txt#path/to/config.spmw.json
 ```
 
 source 按 `~/sources.spmw.json` 中的顺序合并；后面的 source 覆盖前面的同名
@@ -123,7 +130,7 @@ package object，例如：
 ## 命令
 
 - `source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>`：追加或更新 GitHub source archive source。
-- `source add <name> http(s)://<BASE>/<VERSION>`：追加或更新 HTTP release source。
+- `source add <name> http(s)://<CHANNEL.txt>[#<config-rpath>]`：追加或更新 HTTP channel source。
 - `update`：解析 sources，推进 `next-plan.json`。
 - `install`：安装 next plan 并激活。
 - `install -Prepare`：只准备对象，不激活。
@@ -158,31 +165,40 @@ python3 -m http.server 10922 --bind 127.0.0.1 --directory dev-dist
 Windows 侧：
 
 ```powershell
-$env:SPMW_SOURCE_URL = "http://127.0.0.1:10922/spmw/latest"
-irm "http://127.0.0.1:10922/latest/bootstrap.ps1" | iex
+$env:SPMW_SOURCE_URL = "http://127.0.0.1:10922/channels/dev.txt"
+irm "http://127.0.0.1:10922/bootstrap.ps1" | iex
 ```
 
-dev 模式会生成：
+dev 模式生成过程中会先写入 `dev-dist/.tmp.dev/`，成功后重命名为内容 hash
+目录。最终产物包括：
 
-- `dev-dist/latest/spmw.tar.gz`
-- `dev-dist/latest/spmw.tar.gz.sha256`
-- `dev-dist/latest/VERSION.txt`
-- `dev-dist/latest/bootstrap.ps1`
-- `dev-dist/unrelease-<hash9> -> latest`
-- `dev-dist/spmw -> .`
+- `dev-dist/<sha16>/spmw.tar.gz`
+- `dev-dist/<sha16>/spmw.tar.gz.sha256`
+- `dev-dist/bootstrap.ps1`
+- `dev-dist/channels/dev.txt`
 
-## 发布
+dev tarball 内部使用固定顶层目录 `spmw-dev/`，与 GitHub source archive 的
+单顶层目录结构保持一致。
 
-推送 version tag 会发布 release assets：
+## Channel 发布
+
+推送主分支会更新 snapshot channel：
+
+```bash
+git push origin main
+```
+
+GitHub Actions 会把当前 commit 的 source archive URL 写入：
+
+- `gh-pages:channels/snapshot.txt`
+
+推送 version tag 会更新 latest channel：
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-GitHub Actions 会上传：
+GitHub Actions 会把该 tag 的 source archive URL 写入：
 
-- `spmw.tar.gz`
-- `spmw.tar.gz.sha256`
-- `VERSION.txt`
-- `bootstrap.ps1`
+- `gh-pages:channels/latest.txt`

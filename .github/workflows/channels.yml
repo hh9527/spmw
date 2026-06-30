@@ -1,0 +1,75 @@
+name: Channels
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  update-channel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Select channel
+        id: channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/main)
+              echo "name=snapshot" >> "$GITHUB_OUTPUT"
+              echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+              ;;
+            refs/tags/v*)
+              echo "name=latest" >> "$GITHUB_OUTPUT"
+              echo "ref=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "unsupported ref: $GITHUB_REF" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+        continue-on-error: true
+
+      - name: Initialize pages
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! -d pages/.git ]]; then
+            rm -rf pages
+            mkdir pages
+            cd pages
+            git init
+            git checkout -b gh-pages
+            git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
+
+      - name: Update channel
+        shell: bash
+        working-directory: pages
+        run: |
+          set -euo pipefail
+          mkdir -p channels
+          url="https://codeload.github.com/${GITHUB_REPOSITORY}/tar.gz/${{ steps.channel.outputs.ref }}"
+          printf '%s\n' "$url" > "channels/${{ steps.channel.outputs.name }}.txt"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "channels/${{ steps.channel.outputs.name }}.txt"
+          if git diff --cached --quiet; then
+            echo "channel unchanged"
+            exit 0
+          fi
+          git commit -m "Update ${{ steps.channel.outputs.name }} channel"
+          git push origin gh-pages

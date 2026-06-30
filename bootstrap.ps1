@@ -38,6 +38,20 @@ function Get-Text {
     return ([string]::Join("`n", @($text))).Trim()
 }
 
+function Resolve-UrlReference {
+    param(
+        [Parameter(Mandatory)][string]$BaseUrl,
+        [Parameter(Mandatory)][string]$Reference
+    )
+
+    $baseUri = [System.Uri]::new($BaseUrl)
+    $resolved = [System.Uri]::new($baseUri, $Reference.Trim())
+    if ($resolved.Scheme -ne "http" -and $resolved.Scheme -ne "https") {
+        throw "resolved URL must use http or https: $resolved"
+    }
+    return $resolved.AbsoluteUri
+}
+
 function Ensure-UserPathEntry {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -94,37 +108,51 @@ Ensure-UserPathEntry -Path $userBinRoot
 
 $sourceUrl = [string]$env:SPMW_SOURCE_URL
 if ([string]::IsNullOrWhiteSpace($sourceUrl)) {
-    $sourceUrl = "https://github.com/hh9527/spmw/releases/download/latest"
+    $sourceUrl = "https://hh9527.github.io/spmw/channels/latest.txt"
 }
-$sourceUrl = $sourceUrl.TrimEnd("/")
-if ($sourceUrl -notmatch "^(https?://.+)/([^/]+)$") {
-    throw "SPMW_SOURCE_URL must match http(s)://<BASE>/<VERSION>: $sourceUrl"
+$sourceUrl = $sourceUrl.Trim()
+if ($sourceUrl -notmatch "^https?://") {
+    throw "SPMW_SOURCE_URL must be an http(s) channel URL: $sourceUrl"
 }
-$baseUrl = $Matches[1]
-$sourceVersion = $Matches[2]
-$versionUrl = "$baseUrl/$sourceVersion/VERSION.txt"
-$version = Get-Text -Url $versionUrl
-$tarballUrl = "$baseUrl/$version/spmw.tar.gz"
-$shaUrl = "$baseUrl/$version/spmw.tar.gz.sha256"
+$sourceParts = $sourceUrl -split "#", 2
+$channelUrl = $sourceParts[0]
+$tarballUrl = Resolve-UrlReference -BaseUrl $channelUrl -Reference (Get-Text -Url $channelUrl)
 $tarball = Join-Path $bootstrapRoot "spmw.tar.gz"
-$shaFile = Join-Path $bootstrapRoot "spmw.tar.gz.sha256"
+$extractRoot = Join-Path $bootstrapRoot ".extract"
 
 Invoke-CurlDownload -Url $tarballUrl -OutFile $tarball
-Invoke-CurlDownload -Url $shaUrl -OutFile $shaFile
 
-$expectedSha = (Get-Content -Raw -Path $shaFile).Trim().Split()[0].ToLowerInvariant()
-$actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $tarball).Hash.ToLowerInvariant()
-if ($expectedSha -ne $actualSha) {
-    throw "sha256 mismatch for $tarballUrl`: expected $expectedSha, got $actualSha"
+if (Test-Path -LiteralPath $extractRoot) {
+    Remove-Item -LiteralPath $extractRoot -Recurse -Force
+}
+Ensure-Directory $extractRoot
+& tar.exe -xf $tarball -C $extractRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "tar failed for $tarball"
+}
+
+$payloadRoot = $extractRoot
+if (-not (Test-Path -LiteralPath (Join-Path $payloadRoot "bin\spmw-cli.ps1"))) {
+    $candidates = @(Get-ChildItem -LiteralPath $extractRoot -Directory | Where-Object {
+        Test-Path -LiteralPath (Join-Path $_.FullName "bin\spmw-cli.ps1")
+    })
+    if ($candidates.Count -ne 1) {
+        throw "tarball must contain bin\spmw-cli.ps1 at root or inside one top-level directory: $tarballUrl"
+    }
+    $payloadRoot = $candidates[0].FullName
 }
 
 if (Test-Path -LiteralPath (Join-Path $bootstrapRoot "bin")) {
     Remove-Item -LiteralPath (Join-Path $bootstrapRoot "bin") -Recurse -Force
 }
-& tar.exe -xf $tarball -C $bootstrapRoot
-if ($LASTEXITCODE -ne 0) {
-    throw "tar failed for $tarball"
+if (Test-Path -LiteralPath (Join-Path $bootstrapRoot "config.spmw.json")) {
+    Remove-Item -LiteralPath (Join-Path $bootstrapRoot "config.spmw.json") -Force
 }
+Copy-Item -LiteralPath (Join-Path $payloadRoot "bin") -Destination $bootstrapRoot -Recurse -Force
+if (Test-Path -LiteralPath (Join-Path $payloadRoot "config.spmw.json")) {
+    Copy-Item -LiteralPath (Join-Path $payloadRoot "config.spmw.json") -Destination $bootstrapRoot -Force
+}
+Remove-Item -LiteralPath $extractRoot -Recurse -Force
 
 $bootstrapCli = Join-Path $bootstrapRoot "bin\spmw-cli.ps1"
 & powershell.exe -ExecutionPolicy Bypass -File $bootstrapCli source add spmw $sourceUrl

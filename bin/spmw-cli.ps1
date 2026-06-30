@@ -50,7 +50,7 @@ function Show-Help {
 spmw-cli.ps1 update
 spmw-cli.ps1 install [-Prepare]
 spmw-cli.ps1 prune [-Pkgs] [-Fonts] [-Cache]
-spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<BASE>/<VERSION>
+spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<CHANNEL.txt>[#<config-rpath>]
 spmw-cli.ps1 -Help
 
 Commands:
@@ -469,6 +469,14 @@ function Resolve-RemoteVariable {
     switch ($Ty) {
         "Text" {
             return Normalize-RemoteTextVariable -Text $text
+        }
+        "UrlReference" {
+            $baseUri = [System.Uri]::new($Src)
+            $resolved = [System.Uri]::new($baseUri, $text.Trim())
+            if ($resolved.Scheme -ne "http" -and $resolved.Scheme -ne "https") {
+                throw "Package $PackageName variable $Name resolved to unsupported URL scheme: $resolved"
+            }
+            return $resolved.AbsoluteUri
         }
         "CommitFromGithubAtom" {
             $match = [regex]::Match($text, "Commit/(?<sha>[0-9a-fA-F]{40})")
@@ -1681,34 +1689,62 @@ function Invoke-Prune {
     Write-Host "prune complete"
 }
 
-function New-ReleaseSourceDefinition {
+function Split-ChannelSpec {
+    param([Parameter(Mandatory)][string]$Spec)
+
+    $uri = [System.Uri]::new($Spec)
+    if ($uri.Scheme -ne "http" -and $uri.Scheme -ne "https") {
+        throw "Channel source must use http or https: $Spec"
+    }
+
+    $builder = [System.UriBuilder]::new($uri)
+    $fragment = $builder.Fragment
+    $builder.Fragment = ""
+    $channelUrl = $builder.Uri.AbsoluteUri
+    $configRPath = $null
+    if (-not [string]::IsNullOrEmpty($fragment)) {
+        $configRPath = [System.Uri]::UnescapeDataString($fragment.TrimStart("#"))
+        if ([string]::IsNullOrWhiteSpace($configRPath)) {
+            throw "config-rpath fragment must not be empty: $Spec"
+        }
+    }
+
+    return [pscustomobject]@{
+        channelUrl = $channelUrl
+        configRPath = $configRPath
+    }
+}
+
+function New-ChannelSourceDefinition {
     param(
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][string]$BaseUrl,
-        [Parameter(Mandatory)][string]$FilePrefix,
-        [Parameter(Mandatory)][string]$Version
+        [Parameter(Mandatory)][string]$Spec
     )
 
-    $baseUrl = $BaseUrl.TrimEnd("/")
+    $channel = Split-ChannelSpec -Spec $Spec
+    $defs = @(
+        [ordered]@{
+            "tarball-url" = [ordered]@{
+                src = $channel.channelUrl
+                ty = "UrlReference"
+            }
+        }
+    )
+    if ($channel.configRPath) {
+        $defs += [ordered]@{
+            "config-rpath" = $channel.configRPath
+        }
+    }
+
     return [ordered]@{
         name = "source.$Name"
-        defs = @(
-            [ordered]@{
-                version = [ordered]@{
-                    src = "$baseUrl/$Version/VERSION.txt"
-                }
-            }
-        )
+        defs = $defs
         install = @(
             [ordered]@{
                 action = "Unpack"
-                file = "$FilePrefix-<version>.tar.gz"
-                src = "$baseUrl/<version>/spmw.tar.gz"
-                verify = [ordered]@{
-                    sha256 = [ordered]@{
-                        src = "$baseUrl/<version>/spmw.tar.gz.sha256"
-                    }
-                }
+                file = "$Name-<variable-digest>.tar.gz"
+                src = "<tarball-url>"
+                strip = 1
             }
         )
     }
@@ -1723,8 +1759,8 @@ function New-SourceDefinition {
     if (-not (Test-SourceName -Name $Name)) {
         throw "Invalid source name: $Name"
     }
-    if ($Spec -match "^(https?://.+)/([^/]+)$") {
-        return New-ReleaseSourceDefinition -Name $Name -BaseUrl $Matches[1] -FilePrefix "spmw" -Version $Matches[2]
+    if ($Spec -match "^https?://") {
+        return New-ChannelSourceDefinition -Name $Name -Spec $Spec
     }
     if ($Spec -notmatch "^gh-src:([^/]+)/([^/]+)/([^/]+)$") {
         throw "Unsupported source spec: $Spec"
@@ -1759,7 +1795,7 @@ function Invoke-SourceAdd {
     Initialize-Workspace
 
     if ([string]::IsNullOrWhiteSpace($SourceName) -or [string]::IsNullOrWhiteSpace($SourceSpec)) {
-        throw "usage: spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<BASE>/<VERSION>"
+        throw "usage: spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<CHANNEL.txt>[#<config-rpath>]"
     }
 
     $newSource = New-SourceDefinition -Name $SourceName -Spec $SourceSpec
@@ -1801,7 +1837,7 @@ function Invoke-SourceAdd {
 function Invoke-Source {
     switch ($SourceCommand) {
         "add" { Invoke-SourceAdd }
-        default { throw "usage: spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<BASE>/<VERSION>" }
+        default { throw "usage: spmw-cli.ps1 source add <name> gh-src:<OWNER>/<REPO>/<BRANCH>|http(s)://<CHANNEL.txt>[#<config-rpath>]" }
     }
 }
 
