@@ -1,1 +1,1 @@
-https://codeload.github.com/hh9527/spmw/tar.gz/v0.1.0
+https://codeload.github.com/hh9527/spmw/tar.gz/v0.2.0
