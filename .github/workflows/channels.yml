@@ -35,25 +35,20 @@ jobs:
           esac
 
       - name: Checkout pages
-        uses: actions/checkout@v4
-        with:
-          ref: gh-pages
-          path: pages
-        continue-on-error: true
-
-      - name: Initialize pages
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ ! -d pages/.git ]]; then
-            rm -rf pages
-            mkdir pages
-            cd pages
-            git init
-            git checkout -b gh-pages
-            git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf pages
+          mkdir pages
+          cd pages
+          git init
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch --depth=1 origin gh-pages; then
+            git checkout -B gh-pages FETCH_HEAD
+          else
+            git checkout --orphan gh-pages
           fi
 
       - name: Update channel
@@ -72,4 +67,4 @@ jobs:
             exit 0
           fi
           git commit -m "Update ${{ steps.channel.outputs.name }} channel"
-          git push origin gh-pages
+          git push origin HEAD:gh-pages
