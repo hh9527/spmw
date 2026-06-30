@@ -1246,31 +1246,38 @@ function Get-LockState {
     return Get-Json -Path $Script:LockPath
 }
 
+function Get-ResourceSection {
+    param(
+        [Parameter(Mandatory)]$Resources,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    if (Test-Property -Value $Resources -Name $Name) {
+        return @($Resources.PSObject.Properties[$Name].Value)
+    }
+    return @()
+}
+
 function Get-ResourceKeys {
     param([Parameter(Mandatory)]$PlanObject)
 
     $keys = @()
-    if (Test-Property -Value $PlanObject.resources -Name "bins") {
-        foreach ($bin in @($PlanObject.resources.bins)) {
-            $keys += [string]$bin.key
-        }
+    foreach ($bin in Get-ResourceSection -Resources $PlanObject.resources -Name "bins") {
+        $keys += [string]$bin.key
     }
-    if (Test-Property -Value $PlanObject.resources -Name "apps") {
-        foreach ($app in @($PlanObject.resources.apps)) {
-            $keys += [string]$app.key
-        }
+    foreach ($app in Get-ResourceSection -Resources $PlanObject.resources -Name "apps") {
+        $keys += [string]$app.key
     }
-    if (Test-Property -Value $PlanObject.resources -Name "syncs") {
-        foreach ($sync in @($PlanObject.resources.syncs)) {
-            $keys += [string]$sync.key
-        }
+    foreach ($sync in Get-ResourceSection -Resources $PlanObject.resources -Name "syncs") {
+        $keys += [string]$sync.key
     }
-    if (Test-Property -Value $PlanObject.resources -Name "shortcuts") {
-        foreach ($shortcut in @($PlanObject.resources.shortcuts)) {
-            $keys += [string]$shortcut.key
-        }
+    foreach ($link in Get-ResourceSection -Resources $PlanObject.resources -Name "links") {
+        $keys += [string]$link.key
     }
-    foreach ($reg in @($PlanObject.resources.regs)) {
+    foreach ($shortcut in Get-ResourceSection -Resources $PlanObject.resources -Name "shortcuts") {
+        $keys += [string]$shortcut.key
+    }
+    foreach ($reg in Get-ResourceSection -Resources $PlanObject.resources -Name "regs") {
         $keys += [string]$reg.key
     }
     return @($keys | Sort-Object -Unique)
@@ -1906,19 +1913,12 @@ function Invoke-ActivatePlan {
 
     $planObject = Get-Json -Path $PlanPath
     $allResources = @()
-    if (Test-Property -Value $planObject.resources -Name "bins") {
-        $allResources += @($planObject.resources.bins)
-    }
-    if (Test-Property -Value $planObject.resources -Name "apps") {
-        $allResources += @($planObject.resources.apps)
-    }
-    if (Test-Property -Value $planObject.resources -Name "syncs") {
-        $allResources += @($planObject.resources.syncs)
-    }
-    if (Test-Property -Value $planObject.resources -Name "shortcuts") {
-        $allResources += @($planObject.resources.shortcuts)
-    }
-    $allResources += @($planObject.resources.regs)
+    $allResources += Get-ResourceSection -Resources $planObject.resources -Name "bins"
+    $allResources += Get-ResourceSection -Resources $planObject.resources -Name "apps"
+    $allResources += Get-ResourceSection -Resources $planObject.resources -Name "syncs"
+    $allResources += Get-ResourceSection -Resources $planObject.resources -Name "links"
+    $allResources += Get-ResourceSection -Resources $planObject.resources -Name "shortcuts"
+    $allResources += Get-ResourceSection -Resources $planObject.resources -Name "regs"
     $lock = Get-LockState
     Apply-Resources -Resources $allResources
 
